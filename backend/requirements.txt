@@ -1,0 +1,32 @@
+# API Server
+fastapi>=0.110.0
+uvicorn>=0.29.0
+python-multipart>=0.0.9
+websockets>=12.0
+httpx>=0.27.0
+
+# Authentication & Database
+sqlalchemy>=2.0.0
+passlib[bcrypt]>=1.7.4
+python-jose[cryptography]>=3.3.0
+pydantic>=2.0.0
+
+# PyTorch & Machine Learning
+torch>=2.2.0
+torchvision>=0.17.0
+
+# Multimodal VQA Models
+open_clip_torch>=2.24.0
+transformers>=4.38.0
+peft>=0.8.0
+accelerate>=0.29.0
+
+# Image Processing & Explainability
+Pillow>=10.2.0
+opencv-python-headless>=4.9.0
+matplotlib>=3.8.0
+numpy>=1.24.0
+SimpleITK>=2.3.1
+
+# PDF Clinical Report Generation
+reportlab>=4.1.0
