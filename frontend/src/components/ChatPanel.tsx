@@ -9,7 +9,7 @@ const genId = () => Math.random().toString(36).slice(2);
 
 const DISCLAIMER = "⚠️ NeuroVQA is a research and clinical decision-support tool. All findings must be verified by a qualified radiologist. This system does not provide definitive diagnoses.";
 
-export default function ChatPanel({ sessionId }: { sessionId?: number }) {
+export default function ChatPanel({ sessionId }: { sessionId?: string | number }) {
   const { token, currentDiagnosis, chatMessages, addChatMessage, updateLastMessage, isChatConnected, setIsChatConnected } = useAppStore();
   const [input, setInput] = useState("");
   const [isConnecting, setIsConnecting] = useState(false);

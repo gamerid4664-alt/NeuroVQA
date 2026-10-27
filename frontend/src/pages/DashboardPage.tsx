@@ -9,6 +9,7 @@ import {
   HelpCircle,
   XCircle,
   ShieldCheck,
+  ScrollText,
 } from "lucide-react";
 import {
   BarChart,
@@ -23,7 +24,7 @@ import {
   CartesianGrid,
 } from "recharts";
 import { motion } from "framer-motion";
-import { getDashboardStats } from "../api";
+import { getDashboardStats, getAuditLogs } from "../api";
 
 export default function DashboardPage() {
   const [stats, setStats] = useState({
@@ -39,6 +40,13 @@ export default function DashboardPage() {
       incorrect: 4,
       uncertain: 6,
     },
+    confidence_distribution: [
+      { range: "50-60%", cases: 6 },
+      { range: "60-70%", cases: 12 },
+      { range: "70-80%", cases: 24 },
+      { range: "80-90%", cases: 58 },
+      { range: "90-100%", cases: 28 },
+    ],
     recent_cases: [
       { id: 104, date: "2026-10-13", question: "Is there an acute infarct?", answer: "ACUTE INFARCT", confidence: 0.88, status: "ABNORMAL" },
       { id: 103, date: "2026-10-13", question: "Are lateral ventricles enlarged?", answer: "VENTRICULAR ENLARGEMENT", confidence: 0.84, status: "ABNORMAL" },
@@ -48,15 +56,25 @@ export default function DashboardPage() {
     ],
   });
 
+  const [auditLogs, setAuditLogs] = useState<any[]>([]);
+
   useEffect(() => {
     getDashboardStats()
-      .then((res) => setStats(res.data))
+      .then((res) => {
+        if (res.data) setStats(res.data);
+      })
       .catch(() => {
         // Keep offline mock stats
       });
+
+    getAuditLogs()
+      .then((res) => {
+        if (res.data?.logs) setAuditLogs(res.data.logs);
+      })
+      .catch(() => {});
   }, []);
 
-  const distributionData = [
+  const distributionData = stats.confidence_distribution || [
     { range: "50-60%", cases: 6 },
     { range: "60-70%", cases: 12 },
     { range: "70-80%", cases: 24 },
@@ -277,6 +295,66 @@ export default function DashboardPage() {
                 </tbody>
               </table>
             </div>
+          </div>
+        </div>
+
+        {/* Audit Trail & Compliance Table (FR-15, NFR-10) */}
+        <div className="bg-[#161922] border border-[#2A2F42] rounded-2xl p-6">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                <ScrollText size={16} className="text-[#818CF8]" /> Audit Trail & System Traceability (NFR-10)
+              </h2>
+              <p className="text-xs text-[#64748B] mt-0.5">Immutable record of model inferences, report exports, and clinician actions</p>
+            </div>
+            <span className="text-[11px] text-[#64748B] font-mono">
+              {auditLogs.length} events logged
+            </span>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="border-b border-[#2A2F42] text-[#64748B]">
+                  <th className="pb-3 font-semibold">Timestamp</th>
+                  <th className="pb-3 font-semibold">Action</th>
+                  <th className="pb-3 font-semibold">Case ID</th>
+                  <th className="pb-3 font-semibold">Model Version</th>
+                  <th className="pb-3 font-semibold">Inference Latency</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#2A2F42]/60">
+                {auditLogs.length > 0 ? (
+                  auditLogs.slice(0, 10).map((log, idx) => (
+                    <tr key={log.id || idx} className="hover:bg-[#1E2230]/50 transition-colors">
+                      <td className="py-2.5 text-[#94A3B8] font-mono">
+                        {log.created_at ? log.created_at.replace("T", " ").slice(0, 19) : "Just now"}
+                      </td>
+                      <td className="py-2.5">
+                        <span className="px-2 py-0.5 rounded font-mono text-[10px] bg-[#342CB3]/20 border border-[#342CB3]/40 text-[#818CF8] font-bold">
+                          {log.action}
+                        </span>
+                      </td>
+                      <td className="py-2.5 text-white font-mono">
+                        {log.diagnosis_id ? `#${String(log.diagnosis_id).slice(0, 8)}` : "—"}
+                      </td>
+                      <td className="py-2.5 text-[#94A3B8] font-mono text-[11px]">
+                        {log.model_version || "NeuroVQA-v26-BiomedCLIP-LoRA"}
+                      </td>
+                      <td className="py-2.5 text-white font-mono">
+                        {log.inference_latency ? `${log.inference_latency.toFixed(2)}s` : "—"}
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={5} className="py-6 text-center text-[#64748B]">
+                      No audit events recorded yet. Run an MRI diagnosis to view telemetry.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
       </div>

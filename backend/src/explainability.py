@@ -10,9 +10,10 @@ import numpy as np
 from PIL import Image
 
 try:
-    import cv2
+    import cv2  # type: ignore[import-not-found, import-untyped]
     HAS_CV2 = True
-except ImportError:
+except (ImportError, ModuleNotFoundError):
+    cv2 = None  # type: ignore
     HAS_CV2 = False
 
 

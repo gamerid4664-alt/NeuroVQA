@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
   Upload,
   Brain,
@@ -9,6 +9,7 @@ import {
   Eye,
   Sliders,
   CheckCircle2,
+  GitCompare,
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { useAppStore, type Diagnosis } from "../store";
@@ -17,20 +18,24 @@ import { predictMRI, downloadReport } from "../api";
 import MRIViewer from "../components/MRIViewer";
 import ChatPanel from "../components/ChatPanel";
 import FeedbackWidget from "../components/FeedbackWidget";
+import MRIComparisonModal from "../components/MRIComparisonModal";
 
 export default function WorkspacePage() {
   const { currentDiagnosis, setCurrentDiagnosis, isAnalyzing, setIsAnalyzing } = useAppStore();
 
   const [selectedDemoId, setSelectedDemoId] = useState<string>("case1");
+  const [intakeMode, setIntakeMode] = useState<"2d" | "25d">("2d");
   const [question, setQuestion] = useState<string>(
     "Is there an acute infarct present in the cerebral cortex?"
   );
   const [imageFile, setImageFile] = useState<File | null>(null);
+  const [multiSliceFiles, setMultiSliceFiles] = useState<File[]>([]);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [heatmapPreview, setHeatmapPreview] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"side_by_side" | "raw" | "overlay">("side_by_side");
   const [overlayOpacity, setOverlayOpacity] = useState<number>(0.65);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isComparisonOpen, setIsComparisonOpen] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -39,85 +44,39 @@ export default function WorkspacePage() {
     setSelectedDemoId(caseItem.id);
     setQuestion(caseItem.default_question);
     setImageFile(null);
-
-    // Create a generated SVG/Canvas data URI placeholder for the demo scan
-    const canvas = document.createElement("canvas");
-    canvas.width = 256;
-    canvas.height = 256;
-    const ctx = canvas.getContext("2d");
-    if (ctx) {
-      // Draw simulated MRI scan
-      const grad = ctx.createRadialGradient(128, 128, 10, 128, 128, 110);
-      grad.addColorStop(0, "#888888");
-      grad.addColorStop(0.5, "#444444");
-      grad.addColorStop(0.85, "#1a1a1a");
-      grad.addColorStop(1, "#050505");
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.ellipse(128, 128, 90, 110, 0, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Ventricles / Sulci
-      ctx.fillStyle = "#0c0c0c";
-      ctx.beginPath();
-      ctx.ellipse(115, 120, 12, 35, -0.2, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.ellipse(141, 120, 12, 35, 0.2, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Pathology highlight depending on case
-      if (caseItem.id === "case1" || caseItem.id === "case5") {
-        ctx.fillStyle = "#ffffff";
-        ctx.beginPath();
-        ctx.arc(85, 100, 18, 0, Math.PI * 2);
-        ctx.fill();
-      } else if (caseItem.id === "case4") {
-        ctx.strokeStyle = "#e0e0e0";
-        ctx.lineWidth = 14;
-        ctx.beginPath();
-        ctx.arc(128, 128, 85, 0.2 * Math.PI, 0.8 * Math.PI);
-        ctx.stroke();
-      }
-
-      const mriDataUrl = canvas.toDataURL("image/png");
-      setImagePreview(mriDataUrl);
-
-      // Create simulated Grad-CAM heatmap
-      const camCanvas = document.createElement("canvas");
-      camCanvas.width = 256;
-      camCanvas.height = 256;
-      const camCtx = camCanvas.getContext("2d");
-      if (camCtx) {
-        const hGrad = camCtx.createRadialGradient(
-          caseItem.id === "case1" ? 85 : 128,
-          caseItem.id === "case1" ? 100 : 120,
-          5,
-          caseItem.id === "case1" ? 85 : 128,
-          caseItem.id === "case1" ? 100 : 120,
-          60
-        );
-        hGrad.addColorStop(0, "rgba(225, 29, 72, 0.85)"); // Red
-        hGrad.addColorStop(0.4, "rgba(245, 158, 11, 0.6)"); // Amber
-        hGrad.addColorStop(0.8, "rgba(52, 44, 179, 0.3)"); // Blue
-        hGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
-        camCtx.fillStyle = hGrad;
-        camCtx.fillRect(0, 0, 256, 256);
-        setHeatmapPreview(camCanvas.toDataURL("image/png"));
-      }
-    }
+    setMultiSliceFiles([]);
+    setIntakeMode((caseItem as any).id === "case6" ? "25d" : "2d");
+    setImagePreview(`http://localhost:8000/data/demo_samples/${caseItem.filename}`);
+    setHeatmapPreview(null);
   };
 
-  // Initialize first demo case on mount
-  if (!imagePreview && !imageFile) {
-    handleSelectDemo(DEMO_CASES[0]);
-  }
+  // Synchronize reopened or active diagnosis to viewer previews, or initialize demo
+  useEffect(() => {
+    if (currentDiagnosis) {
+      if (currentDiagnosis.mri_url) {
+        setImagePreview(currentDiagnosis.mri_url);
+      }
+      if (currentDiagnosis.heatmap_url) {
+        setHeatmapPreview(currentDiagnosis.heatmap_url);
+      }
+      if (currentDiagnosis.question) {
+        setQuestion(currentDiagnosis.question);
+      }
+      if (currentDiagnosis.slice_mode && currentDiagnosis.slice_mode.includes("2.5D")) {
+        setIntakeMode("25d");
+      }
+      setSelectedDemoId("");
+    } else if (!imagePreview && !imageFile) {
+      handleSelectDemo(DEMO_CASES[0]);
+    }
+  }, [currentDiagnosis]);
 
-  // Handle local file upload
+  // Handle local single file upload
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       setImageFile(file);
+      setMultiSliceFiles([]);
       setSelectedDemoId("");
       const url = URL.createObjectURL(file);
       setImagePreview(url);
@@ -125,15 +84,42 @@ export default function WorkspacePage() {
     }
   };
 
+  // Handle 3-slice 2.5D volumetric stack file upload (FR-1)
+  const handleMultiFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 3) {
+      setMultiSliceFiles(files);
+      setImageFile(files[1]); // Center slice (k) used for primary display
+      setSelectedDemoId("");
+      const url = URL.createObjectURL(files[1]);
+      setImagePreview(url);
+      setHeatmapPreview(null);
+    } else if (files.length > 0) {
+      alert("Please select exactly 3 contiguous axial slices (k-1, k, k+1) for 2.5D volumetric analysis.");
+    }
+  };
+
   // Execute VQA inference
   const handleRunAnalysis = async () => {
-    if (!imagePreview && !imageFile) return;
+    if (!imagePreview && !imageFile && multiSliceFiles.length === 0) return;
     setIsAnalyzing(true);
 
     const startTime = performance.now();
 
     try {
-      if (imageFile) {
+      if (intakeMode === "25d" && multiSliceFiles.length === 3) {
+        // Upload 3-slice 2.5D volumetric stack (FR-1)
+        const formData = new FormData();
+        formData.append("files", multiSliceFiles[0]);
+        formData.append("files", multiSliceFiles[1]);
+        formData.append("files", multiSliceFiles[2]);
+        formData.append("question", question);
+        const res = await predictMRI(formData);
+        setCurrentDiagnosis(res.data);
+        if (res.data.heatmap_url) {
+          setHeatmapPreview(res.data.heatmap_url);
+        }
+      } else if (imageFile) {
         const formData = new FormData();
         formData.append("file", imageFile);
         formData.append("question", question);
@@ -142,35 +128,49 @@ export default function WorkspacePage() {
         if (res.data.heatmap_url) {
           setHeatmapPreview(res.data.heatmap_url);
         }
-      } else {
-        // Connected to demo / simulated case
-        await new Promise((r) => setTimeout(r, 1400));
-        const matchedDemo = DEMO_CASES.find((c) => c.id === selectedDemoId) || DEMO_CASES[0];
-        const isNormal = matchedDemo.expected_answer === "NORMAL";
-
-        const simDiagnosis: Diagnosis = {
-          id: Math.floor(Math.random() * 9000) + 1000,
-          question: question,
-          answer: matchedDemo.expected_answer,
-          confidence: isNormal ? 0.942 : 0.876,
-          status: matchedDemo.status,
-          latency_seconds: Number(((performance.now() - startTime) / 1000).toFixed(2)),
-          top_3_predictions: [
-            { answer: matchedDemo.expected_answer, confidence: isNormal ? 0.942 : 0.876 },
-            {
-              answer: isNormal ? "UNCERTAIN" : "NORMAL",
-              confidence: isNormal ? 0.041 : 0.082,
-            },
-            {
-              answer: isNormal ? "ARTIFACT" : "MICROVASCULAR DISEASE",
-              confidence: isNormal ? 0.017 : 0.042,
-            },
-          ],
-          mri_url: imagePreview || undefined,
-          heatmap_url: heatmapPreview || undefined,
-          created_at: new Date().toISOString(),
-        };
-        setCurrentDiagnosis(simDiagnosis);
+      } else if (imagePreview) {
+        // Fetch demo image slice and run live VQA prediction on backend
+        try {
+          const blobRes = await fetch(imagePreview);
+          const blob = await blobRes.blob();
+          const file = new File([blob], `${selectedDemoId || "demo_scan"}.png`, { type: "image/png" });
+          const formData = new FormData();
+          if (intakeMode === "25d" || selectedDemoId === "case6") {
+            formData.append("files", file);
+            formData.append("files", file);
+            formData.append("files", file);
+          } else {
+            formData.append("file", file);
+          }
+          formData.append("question", question);
+          const res = await predictMRI(formData);
+          setCurrentDiagnosis(res.data);
+          if (res.data.heatmap_url) {
+            setHeatmapPreview(res.data.heatmap_url);
+          }
+        } catch {
+          // Fallback if backend is offline
+          const matchedDemo = DEMO_CASES.find((c) => c.id === selectedDemoId) || DEMO_CASES[0];
+          const isNormal = matchedDemo.expected_answer === "NORMAL";
+          const simDiagnosis: Diagnosis = {
+            id: Math.floor(Math.random() * 9000) + 1000,
+            question: question,
+            answer: matchedDemo.expected_answer,
+            confidence: isNormal ? 0.942 : 0.876,
+            status: matchedDemo.status,
+            latency_seconds: Number(((performance.now() - startTime) / 1000).toFixed(2)),
+            top_3_predictions: [
+              { answer: matchedDemo.expected_answer, confidence: isNormal ? 0.942 : 0.876 },
+              { answer: isNormal ? "UNCERTAIN" : "NORMAL", confidence: isNormal ? 0.041 : 0.082 },
+              { answer: isNormal ? "ARTIFACT" : "MICROVASCULAR DISEASE", confidence: isNormal ? 0.017 : 0.042 },
+            ],
+            mri_url: imagePreview || undefined,
+            heatmap_url: heatmapPreview || undefined,
+            slice_mode: intakeMode === "25d" ? "2.5D Volumetric Stack (3 Contiguous Axial Slices)" : "2D Single Axial Slice",
+            created_at: new Date().toISOString(),
+          };
+          setCurrentDiagnosis(simDiagnosis);
+        }
       }
     } catch (err: any) {
       console.warn("Backend predict failed, fallback to offline demo result:", err);
@@ -190,6 +190,7 @@ export default function WorkspacePage() {
         ],
         mri_url: imagePreview || undefined,
         heatmap_url: heatmapPreview || undefined,
+        slice_mode: intakeMode === "25d" ? "2.5D Volumetric Stack (3 Contiguous Axial Slices)" : "2D Single Axial Slice",
         created_at: new Date().toISOString(),
       };
       setCurrentDiagnosis(simDiagnosis);
@@ -270,21 +271,56 @@ export default function WorkspacePage() {
           </div>
         </div>
 
+        {/* Scan Dimensionality Selector (FR-1) */}
+        <div className="mb-3">
+          <label className="text-[11px] font-semibold text-[#94A3B8] mb-1.5 block">
+            Scan Dimensionality (FR-1)
+          </label>
+          <div className="grid grid-cols-2 gap-1.5 p-1 bg-[#161922] border border-[#2A2F42] rounded-xl">
+            <button
+              onClick={() => {
+                setIntakeMode("2d");
+                setMultiSliceFiles([]);
+              }}
+              className={`py-1 rounded-lg text-xs font-semibold transition-all ${
+                intakeMode === "2d"
+                  ? "bg-[#342CB3] text-white shadow-sm"
+                  : "text-[#94A3B8] hover:text-white"
+              }`}
+            >
+              2D Single Slice
+            </button>
+            <button
+              onClick={() => setIntakeMode("25d")}
+              className={`py-1 rounded-lg text-xs font-semibold transition-all ${
+                intakeMode === "25d"
+                  ? "bg-[#342CB3] text-white shadow-sm"
+                  : "text-[#94A3B8] hover:text-white"
+              }`}
+            >
+              3-Slice 2.5D Stack
+            </button>
+          </div>
+        </div>
+
         {/* Custom Upload Box */}
         <div className="mb-4">
           <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[11px] font-semibold text-[#94A3B8]">Or Upload Axial Slice</span>
-            {imageFile && (
+            <span className="text-[11px] font-semibold text-[#94A3B8]">
+              {intakeMode === "25d" ? "Upload 3 Contiguous Slices" : "Or Upload Axial Slice"}
+            </span>
+            {(imageFile || multiSliceFiles.length === 3) && (
               <span className="text-[10px] text-[#10B981] flex items-center gap-1">
-                <CheckCircle2 size={10} /> Loaded
+                <CheckCircle2 size={10} /> {intakeMode === "25d" ? "3 Slices Loaded" : "Loaded"}
               </span>
             )}
           </div>
           <input
             type="file"
             ref={fileInputRef}
-            onChange={handleFileUpload}
+            onChange={intakeMode === "25d" ? handleMultiFileUpload : handleFileUpload}
             accept=".png,.jpg,.jpeg,.dcm,.nii"
+            multiple={intakeMode === "25d"}
             className="hidden"
           />
           <div
@@ -292,9 +328,26 @@ export default function WorkspacePage() {
             className="border border-dashed border-[#2A2F42] hover:border-[#4F46E5] rounded-xl p-3 text-center cursor-pointer transition-colors bg-[#161922]/50 hover:bg-[#161922]"
           >
             <Upload size={16} className="mx-auto text-[#64748B] mb-1" />
-            <div className="text-xs text-[#94A3B8] font-medium">Click to select MRI file</div>
-            <div className="text-[10px] text-[#64748B]">PNG, JPEG, or NIfTI 2.5D slice</div>
+            <div className="text-xs text-[#94A3B8] font-medium">
+              {intakeMode === "25d" ? "Click to select 3 slices (k-1, k, k+1)" : "Click to select MRI file"}
+            </div>
+            <div className="text-[10px] text-[#64748B]">
+              {intakeMode === "25d" ? "PNG, JPEG, or NIfTI volumetric slices" : "PNG, JPEG, or NIfTI slice"}
+            </div>
           </div>
+          {intakeMode === "25d" && multiSliceFiles.length === 3 && (
+            <div className="mt-2 grid grid-cols-3 gap-1 text-center">
+              <span className="px-1.5 py-0.5 rounded bg-[#1E2230] text-[9px] text-[#94A3B8] truncate" title={multiSliceFiles[0].name}>
+                k-1: {multiSliceFiles[0].name}
+              </span>
+              <span className="px-1.5 py-0.5 rounded bg-[#342CB3]/30 border border-[#342CB3] text-[9px] text-[#818CF8] truncate" title={multiSliceFiles[1].name}>
+                k: {multiSliceFiles[1].name}
+              </span>
+              <span className="px-1.5 py-0.5 rounded bg-[#1E2230] text-[9px] text-[#94A3B8] truncate" title={multiSliceFiles[2].name}>
+                k+1: {multiSliceFiles[2].name}
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Clinical Question Input */}
@@ -400,6 +453,16 @@ export default function WorkspacePage() {
                 />
               </div>
             )}
+
+            {/* Compare Prior Scan (FR-16) */}
+            <button
+              onClick={() => setIsComparisonOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 bg-[#1E2230] hover:bg-[#2A2F42] border border-[#2A2F42] rounded-lg text-[11px] font-medium text-[#818CF8] hover:text-white transition-all ml-2"
+              title="Compare with prior MRI examination (FR-16)"
+            >
+              <GitCompare size={12} />
+              <span>Compare Prior Scan</span>
+            </button>
           </div>
         </div>
 
@@ -408,7 +471,12 @@ export default function WorkspacePage() {
           {viewMode === "side_by_side" ? (
             <>
               <div className="flex-1 h-full flex flex-col">
-                <MRIViewer src={imagePreview} label="Raw Axial MRI Scan" showTools={true} />
+                <MRIViewer
+                  src={imagePreview}
+                  label="Raw Axial MRI Scan"
+                  showTools={true}
+                  onAskAboutRegion={(p) => setQuestion(p)}
+                />
               </div>
               <div className="w-[1px] bg-[#2A2F42] h-full" />
               <div className="flex-1 h-full flex flex-col relative">
@@ -425,11 +493,21 @@ export default function WorkspacePage() {
             </>
           ) : viewMode === "raw" ? (
             <div className="w-full h-full">
-              <MRIViewer src={imagePreview} label="Axial MRI Scan" showTools={true} />
+              <MRIViewer
+                src={imagePreview}
+                label="Axial MRI Scan"
+                showTools={true}
+                onAskAboutRegion={(p) => setQuestion(p)}
+              />
             </div>
           ) : (
             <div className="w-full h-full relative">
-              <MRIViewer src={imagePreview} label="MRI Scan + Grad-CAM Heatmap Overlay" showTools={true} />
+              <MRIViewer
+                src={imagePreview}
+                label="MRI Scan + Grad-CAM Heatmap Overlay"
+                showTools={true}
+                onAskAboutRegion={(p) => setQuestion(p)}
+              />
               {heatmapPreview && (
                 <img
                   src={heatmapPreview}
@@ -451,7 +529,7 @@ export default function WorkspacePage() {
           >
             <div className="flex items-start justify-between mb-4">
               <div>
-                <div className="flex items-center gap-2 mb-1">
+                <div className="flex items-center gap-2 mb-1 flex-wrap">
                   <span
                     className={`text-[10px] font-extrabold px-2.5 py-0.5 rounded-full border ${
                       currentDiagnosis.status.includes("ABNORMALITY")
@@ -466,6 +544,11 @@ export default function WorkspacePage() {
                   <span className="text-[10px] text-[#64748B] flex items-center gap-1">
                     <Clock size={11} /> {currentDiagnosis.latency_seconds}s inference
                   </span>
+                  {currentDiagnosis.slice_mode && (
+                    <span className="text-[10px] text-[#818CF8] bg-[#342CB3]/20 border border-[#342CB3]/50 px-2.5 py-0.5 rounded-full font-semibold">
+                      {currentDiagnosis.slice_mode}
+                    </span>
+                  )}
                 </div>
                 <h3 className="text-xl font-bold text-white tracking-tight">
                   {currentDiagnosis.answer}
@@ -537,6 +620,13 @@ export default function WorkspacePage() {
       <div className="w-[380px] shrink-0 bg-[#0E1117] flex flex-col h-full overflow-hidden">
         <ChatPanel sessionId={currentDiagnosis?.id || 1} />
       </div>
+
+      {/* ── LONGITUDINAL MRI COMPARISON MODAL (FR-16) ── */}
+      <MRIComparisonModal
+        isOpen={isComparisonOpen}
+        onClose={() => setIsComparisonOpen(false)}
+        currentDiagnosis={currentDiagnosis}
+      />
     </div>
   );
 }

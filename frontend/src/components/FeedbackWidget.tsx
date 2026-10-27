@@ -10,7 +10,7 @@ const FEEDBACK_OPTIONS = [
   { type: "uncertain", label: "Uncertain", icon: HelpCircle, color: "#94A3B8", bg: "rgba(148,163,184,0.1)", border: "#94A3B8" },
 ];
 
-export default function FeedbackWidget({ diagnosisId }: { diagnosisId: number }) {
+export default function FeedbackWidget({ diagnosisId }: { diagnosisId: number | string }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const [submitted, setSubmitted] = useState(false);

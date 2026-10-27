@@ -4,13 +4,16 @@ import {
   Brain,
   FileDown,
   ArrowUpRight,
+  Filter,
+  RotateCcw,
+  SlidersHorizontal,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useAppStore, type Diagnosis } from "../store";
-import { getHistory, downloadReport } from "../api";
+import { getHistory, downloadReport, getDiagnosis } from "../api";
 
 interface HistoryCase {
-  id: number;
+  id: number | string;
   date: string;
   question: string;
   answer: string;
@@ -18,6 +21,8 @@ interface HistoryCase {
   status: string;
   latency_seconds: number;
   feedback?: string;
+  mri_url?: string;
+  heatmap_url?: string;
 }
 
 const MOCK_HISTORY: HistoryCase[] = [
@@ -87,6 +92,8 @@ export default function HistoryPage() {
   const [cases, setCases] = useState<HistoryCase[]>(MOCK_HISTORY);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
+  const [confidenceFilter, setConfidenceFilter] = useState("ALL");
+  const [feedbackFilter, setFeedbackFilter] = useState("ALL");
   const { setCurrentDiagnosis } = useAppStore();
   const navigate = useNavigate();
 
@@ -108,16 +115,52 @@ export default function HistoryPage() {
       c.answer.toLowerCase().includes(search.toLowerCase()) ||
       c.id.toString().includes(search);
 
-    const matchFilter =
+    const matchStatus =
       statusFilter === "ALL" ||
       (statusFilter === "ABNORMAL" && c.status.includes("ABNORMAL")) ||
       (statusFilter === "NORMAL" && c.status.includes("NORMAL")) ||
       (statusFilter === "UNCERTAIN" && c.status.includes("UNCERTAIN"));
 
-    return matchSearch && matchFilter;
+    const matchConfidence =
+      confidenceFilter === "ALL" ||
+      (confidenceFilter === "HIGH" && c.confidence >= 0.85) ||
+      (confidenceFilter === "MODERATE" && c.confidence >= 0.70 && c.confidence < 0.85) ||
+      (confidenceFilter === "LOW" && c.confidence < 0.70);
+
+    const cFb = (c.feedback || "").toLowerCase();
+    const matchFeedback =
+      feedbackFilter === "ALL" ||
+      (feedbackFilter === "PENDING" && !c.feedback) ||
+      (feedbackFilter === "CORRECT" && cFb.includes("correct") && !cFb.includes("partial")) ||
+      (feedbackFilter === "PARTIAL" && (cFb.includes("partial") || cFb.includes("partially_correct"))) ||
+      (feedbackFilter === "INCORRECT" && cFb.includes("incorrect")) ||
+      (feedbackFilter === "UNCERTAIN" && cFb.includes("uncertain"));
+
+    return matchSearch && matchStatus && matchConfidence && matchFeedback;
   });
 
-  const handleReopenInWorkspace = (c: HistoryCase) => {
+  const hasActiveFilters =
+    search !== "" || statusFilter !== "ALL" || confidenceFilter !== "ALL" || feedbackFilter !== "ALL";
+
+  const resetFilters = () => {
+    setSearch("");
+    setStatusFilter("ALL");
+    setConfidenceFilter("ALL");
+    setFeedbackFilter("ALL");
+  };
+
+  const handleReopenInWorkspace = async (c: HistoryCase) => {
+    try {
+      const res = await getDiagnosis(c.id);
+      if (res.data) {
+        setCurrentDiagnosis(res.data);
+        navigate("/app");
+        return;
+      }
+    } catch {
+      // Fallback to table data if offline or network error
+    }
+
     const diag: Diagnosis = {
       id: c.id,
       question: c.question,
@@ -136,7 +179,7 @@ export default function HistoryPage() {
     navigate("/app");
   };
 
-  const handleDownload = async (id: number) => {
+  const handleDownload = async (id: number | string) => {
     try {
       const res = await downloadReport(id);
       const blob = new Blob([res.data], { type: "application/pdf" });
@@ -162,7 +205,7 @@ export default function HistoryPage() {
               <Brain className="text-[#4F46E5]" /> Diagnostic Case History
             </h1>
             <p className="text-xs text-[#94A3B8] mt-1">
-              Search, review, and reopen previous brain MRI evaluations
+              Search, multi-criteria filter, and reopen previous brain MRI evaluations
             </p>
           </div>
           <div className="text-xs text-[#64748B]">
@@ -170,33 +213,86 @@ export default function HistoryPage() {
           </div>
         </div>
 
-        {/* Filter Bar */}
-        <div className="flex flex-col sm:flex-row items-center gap-3 bg-[#161922] border border-[#2A2F42] rounded-2xl p-3">
-          <div className="relative flex-1 w-full">
-            <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#64748B]" />
-            <input
-              type="text"
-              placeholder="Search by case #, clinical question, or pathology..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="w-full bg-[#1E2230] border border-[#2A2F42] rounded-xl pl-9 pr-4 py-2 text-xs text-white placeholder-[#64748B] focus:outline-none focus:border-[#4F46E5]"
-            />
+        {/* Multi-Criteria Filter Bar (FR-13) */}
+        <div className="bg-[#161922] border border-[#2A2F42] rounded-2xl p-4 space-y-3">
+          <div className="flex flex-col md:flex-row items-center gap-3">
+            <div className="relative flex-1 w-full">
+              <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#64748B]" />
+              <input
+                type="text"
+                placeholder="Search by case #, clinical question, or pathology..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="w-full bg-[#1E2230] border border-[#2A2F42] rounded-xl pl-9 pr-4 py-2 text-xs text-white placeholder-[#64748B] focus:outline-none focus:border-[#4F46E5]"
+              />
+            </div>
+
+            {/* Status Tabs */}
+            <div className="flex items-center gap-1 w-full md:w-auto overflow-x-auto">
+              {["ALL", "ABNORMAL", "NORMAL", "UNCERTAIN"].map((type) => (
+                <button
+                  key={type}
+                  onClick={() => setStatusFilter(type)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
+                    statusFilter === type
+                      ? "bg-[#342CB3] text-white"
+                      : "text-[#64748B] hover:text-white hover:bg-[#1E2230]"
+                  }`}
+                >
+                  {type}
+                </button>
+              ))}
+            </div>
           </div>
 
-          <div className="flex items-center gap-1.5 w-full sm:w-auto overflow-x-auto">
-            {["ALL", "ABNORMAL", "NORMAL", "UNCERTAIN"].map((type) => (
+          {/* Secondary Filter Row: Confidence Range, Feedback, and Reset */}
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-[#2A2F42]/60 text-xs">
+            <div className="flex flex-wrap items-center gap-4">
+              {/* Confidence Filter Dropdown */}
+              <div className="flex items-center gap-2">
+                <span className="text-[#64748B] font-medium flex items-center gap-1">
+                  <SlidersHorizontal size={12} className="text-[#818CF8]" /> Confidence:
+                </span>
+                <select
+                  value={confidenceFilter}
+                  onChange={(e) => setConfidenceFilter(e.target.value)}
+                  className="bg-[#1E2230] border border-[#2A2F42] rounded-lg px-2.5 py-1 text-xs text-white focus:outline-none focus:border-[#4F46E5]"
+                >
+                  <option value="ALL">All Confidence Levels</option>
+                  <option value="HIGH">High Confidence (≥ 85%)</option>
+                  <option value="MODERATE">Moderate (70% – 84%)</option>
+                  <option value="LOW">Low / Inconclusive (&lt; 70%)</option>
+                </select>
+              </div>
+
+              {/* Feedback Filter Dropdown */}
+              <div className="flex items-center gap-2">
+                <span className="text-[#64748B] font-medium flex items-center gap-1">
+                  <Filter size={12} className="text-[#34D399]" /> Feedback:
+                </span>
+                <select
+                  value={feedbackFilter}
+                  onChange={(e) => setFeedbackFilter(e.target.value)}
+                  className="bg-[#1E2230] border border-[#2A2F42] rounded-lg px-2.5 py-1 text-xs text-white focus:outline-none focus:border-[#4F46E5]"
+                >
+                  <option value="ALL">All Clinician Reviews</option>
+                  <option value="CORRECT">Correct</option>
+                  <option value="PARTIAL">Partially Correct</option>
+                  <option value="INCORRECT">Incorrect</option>
+                  <option value="UNCERTAIN">Uncertain</option>
+                  <option value="PENDING">Pending Review</option>
+                </select>
+              </div>
+            </div>
+
+            {hasActiveFilters && (
               <button
-                key={type}
-                onClick={() => setStatusFilter(type)}
-                className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
-                  statusFilter === type
-                    ? "bg-[#342CB3] text-white"
-                    : "text-[#64748B] hover:text-white hover:bg-[#1E2230]"
-                }`}
+                onClick={resetFilters}
+                className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-[#1E2230] hover:bg-[#2A2F42] text-[#94A3B8] hover:text-white transition-colors text-xs font-semibold"
               >
-                {type}
+                <RotateCcw size={11} /> Reset Filters
               </button>
-            ))}
+            )}
           </div>
         </div>
 

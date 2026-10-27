@@ -2,13 +2,13 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 export interface User {
-  id: number;
+  id: string | number;
   full_name: string;
   email: string;
 }
 
 export interface Diagnosis {
-  id: number;
+  id: string | number;
   question: string;
   answer: string;
   confidence: number;
@@ -17,6 +17,7 @@ export interface Diagnosis {
   latency_seconds: number;
   mri_url?: string;
   heatmap_url?: string;
+  slice_mode?: string;
   created_at: string;
 }
 

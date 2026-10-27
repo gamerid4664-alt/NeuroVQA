@@ -12,7 +12,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 import httpx
 from sqlalchemy.orm import Session
 
-from .database import get_db, SessionLocal, ChatSession, ChatMessage, Diagnosis
+from .database import get_db, SessionLocal, ChatSession, ChatMessage, Diagnosis, AuditLog
+from .supabase_client import is_supabase_enabled, supabase_insert_audit_log
 
 router = APIRouter(tags=["Chat"])
 
@@ -31,20 +32,29 @@ STRICT CLINICAL RULES:
 
 
 @router.websocket("/ws/chat")
-async def websocket_chat_endpoint(websocket: WebSocket, session_id: Optional[int] = None, token: Optional[str] = None):
+async def websocket_chat_endpoint(websocket: WebSocket, session_id: Optional[str] = None, token: Optional[str] = None):
     await websocket.accept()
     db: Session = SessionLocal()
 
     try:
         # Load or create chat session
         chat_sess = None
-        if session_id:
-            chat_sess = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+        if session_id and str(session_id).isdigit():
+            chat_sess = db.query(ChatSession).filter(ChatSession.id == int(session_id)).first()
         if not chat_sess:
             chat_sess = ChatSession(title="MRI Case Consultation")
             db.add(chat_sess)
             db.commit()
             db.refresh(chat_sess)
+
+            # Record CHAT_STARTED audit log (FR-15, Design 5.5)
+            diag_id_val = int(session_id) if (session_id and str(session_id).isdigit()) else None
+            audit = AuditLog(diagnosis_id=diag_id_val, action="CHAT_STARTED")
+            db.add(audit)
+            db.commit()
+
+            if is_supabase_enabled():
+                await supabase_insert_audit_log({"diagnosis_id": str(session_id or ""), "action": "CHAT_STARTED"})
 
         while True:
             raw_data = await websocket.receive_text()
@@ -72,11 +82,21 @@ VERIFIED VQA ENGINE FINDINGS:
 """
             full_system = f"{SYSTEM_PROMPT}\n{context_block}"
 
-            # Prepare messages for Ollama
-            messages = [
-                {"role": "system", "content": full_system},
-                {"role": "user", "content": user_text},
-            ]
+            # Fetch past conversation messages (up to 8 turns for context, excluding the latest message)
+            past_messages = (
+                db.query(ChatMessage)
+                .filter(ChatMessage.session_id == chat_sess.id, ChatMessage.id != user_msg.id)
+                .order_by(ChatMessage.created_at.desc())
+                .limit(8)
+                .all()
+            )
+            past_messages.reverse()
+
+            # Prepare grounded multi-turn messages for Ollama
+            messages = [{"role": "system", "content": full_system}]
+            for m in past_messages:
+                messages.append({"role": m.role, "content": m.content})
+            messages.append({"role": "user", "content": user_text})
 
             full_reply = ""
             ollama_success = False

@@ -44,14 +44,14 @@ export const getDashboardStats = () => api.get("/api/dashboard/stats");
 export const getHistory = (params?: { search?: string; result_type?: string; page?: number }) =>
   api.get("/api/history", { params });
 
-export const getDiagnosis = (id: number) => api.get(`/api/diagnoses/${id}`);
+export const getDiagnosis = (id: number | string) => api.get(`/api/diagnoses/${id}`);
 
 // ----- Feedback -----
-export const submitFeedback = (diagnosisId: number, feedback_type: string, doctor_note?: string) =>
+export const submitFeedback = (diagnosisId: number | string, feedback_type: string, doctor_note?: string) =>
   api.post("/api/feedback", { diagnosis_id: diagnosisId, feedback_type, doctor_note });
 
 // ----- Reports -----
-export const downloadReport = (diagnosisId: number) =>
+export const downloadReport = (diagnosisId: number | string) =>
   api.get(`/api/reports/${diagnosisId}/download`, { responseType: "blob" });
 
 // ----- Audit -----

@@ -1,0 +1,68 @@
+# ==============================================================================
+# NeuroVQA — Git Ignore Configuration
+# ==============================================================================
+
+# Environment files and credentials (CRITICAL - NEVER COMMIT)
+.env
+.env.*
+*.env
+*.env.local
+*.env.*.local
+.env.production
+.env.development
+*.local
+!.env.example
+!*.env.example
+!**/.env.example
+
+# Node / Frontend
+node_modules/
+**/node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
+dist-ssr/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python / Virtual Environments / Cache
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Local Database, Checkpoints & Large Artifacts
+*.db
+*.sqlite3
+backend/neurovqa.db
+backend/checkpoints/*.pt
+backend/checkpoints/*.bin
+!backend/checkpoints/.gitkeep
+backend/data/uploads/*
+!backend/data/uploads/.gitkeep
+backend/data/heatmaps/*
+!backend/data/heatmaps/.gitkeep
+backend/data/reports/*
+!backend/data/reports/.gitkeep
+
+# IDEs & System files
+.vscode/
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Agent & Temporary IDE files
+.agents/
+scratch/

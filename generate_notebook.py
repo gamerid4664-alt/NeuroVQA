@@ -545,17 +545,21 @@ for epoch in range(1, NUM_EPOCHS + 1):
         patience_ctr  = 0
         torch.save({
             "epoch": epoch,
-            "model_state_dict": model.fusion_head.state_dict(),
-            "lora_state_dict" : model.text_encoder.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "val_acc"  : best_val_acc,
-            "val_loss" : best_val_loss,
-            "class_to_idx": class_to_idx,
-            "idx_to_class": idx_to_class,
-            "model_version": MODEL_VERSION,
-            "embed_dim": EMBED_DIM,
-            "num_heads": NUM_HEADS,
-            "num_classes": len(class_to_idx),
+            "fusion_head_state_dict": model.fusion_head.state_dict(),
+            "cross_attn_state_dict" : model.cross_attn.state_dict(),
+            "visual_proj_state_dict": model.visual_proj.state_dict(),
+            "text_proj_state_dict"  : model.text_proj.state_dict(),
+            "lora_state_dict"       : model.text_encoder.state_dict(),
+            "model_state_dict"      : model.fusion_head.state_dict(),
+            "optimizer_state_dict"  : optimizer.state_dict(),
+            "val_acc"               : best_val_acc,
+            "val_loss"              : best_val_loss,
+            "class_to_idx"          : class_to_idx,
+            "idx_to_class"          : idx_to_class,
+            "model_version"         : MODEL_VERSION,
+            "embed_dim"             : EMBED_DIM,
+            "num_heads"             : NUM_HEADS,
+            "num_classes"           : len(class_to_idx),
         }, f"{CHECKPOINT_DIR}/neurovqa_best.pt")
     else:
         patience_ctr += 1
@@ -599,8 +603,18 @@ import numpy as np
 
 # Load best checkpoint
 ckpt = torch.load(f"{CHECKPOINT_DIR}/neurovqa_best.pt", map_location=DEVICE)
-model.fusion_head.load_state_dict(ckpt["model_state_dict"])
-model.text_encoder.load_state_dict(ckpt["lora_state_dict"])
+if "fusion_head_state_dict" in ckpt:
+    model.fusion_head.load_state_dict(ckpt["fusion_head_state_dict"])
+elif "model_state_dict" in ckpt:
+    model.fusion_head.load_state_dict(ckpt["model_state_dict"])
+if "cross_attn_state_dict" in ckpt:
+    model.cross_attn.load_state_dict(ckpt["cross_attn_state_dict"])
+if "visual_proj_state_dict" in ckpt:
+    model.visual_proj.load_state_dict(ckpt["visual_proj_state_dict"])
+if "text_proj_state_dict" in ckpt:
+    model.text_proj.load_state_dict(ckpt["text_proj_state_dict"])
+if "lora_state_dict" in ckpt:
+    model.text_encoder.load_state_dict(ckpt["lora_state_dict"])
 model.eval()
 
 all_preds, all_labels = [], []
@@ -746,8 +760,12 @@ FINAL_WEIGHTS = f"{CHECKPOINT_DIR}/neurovqa_weights.pt"
 
 torch.save({
     # model weights
-    "model_state_dict" : model.fusion_head.state_dict(),
-    "lora_state_dict"  : model.text_encoder.state_dict(),
+    "fusion_head_state_dict": model.fusion_head.state_dict(),
+    "cross_attn_state_dict" : model.cross_attn.state_dict(),
+    "visual_proj_state_dict": model.visual_proj.state_dict(),
+    "text_proj_state_dict"  : model.text_proj.state_dict(),
+    "lora_state_dict"       : model.text_encoder.state_dict(),
+    "model_state_dict"      : model.fusion_head.state_dict(),
 
     # class mapping (required at inference time)
     "class_to_idx"     : class_to_idx,
