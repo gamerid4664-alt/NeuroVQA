@@ -72,14 +72,19 @@ print("✅ All dependencies installed.")
 # ── SECTION 3 : GOOGLE DRIVE MOUNT ───────────────────────────────────────────
 md("## 3 · Mount Google Drive (Checkpoint Persistence)"),
 code("""\
-from google.colab import drive
 import os
 
-drive.mount('/content/drive')
+try:
+    from google.colab import drive
+    drive.mount('/content/drive')
+    CHECKPOINT_DIR = "/content/drive/MyDrive/NeuroVQA_Checkpoints"
+    print("✅ Google Drive mounted successfully.")
+except Exception as e:
+    print(f"ℹ️ Non-Colab or standalone environment ({e}). Using local checkpoint directory.")
+    CHECKPOINT_DIR = "./NeuroVQA_Checkpoints"
 
-CHECKPOINT_DIR = "/content/drive/MyDrive/NeuroVQA_Checkpoints"
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-print(f"✅ Checkpoint directory: {CHECKPOINT_DIR}")
+print(f"✅ Checkpoint directory ready: {CHECKPOINT_DIR}")
 """),
 
 # ── SECTION 4 : CONFIGURATION ─────────────────────────────────────────────────
@@ -151,9 +156,17 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 # ── 6.1  Download VQA-RAD JSON from HuggingFace datasets ─────────────────────
 print("Downloading VQA-RAD via HuggingFace datasets …")
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 
-vqarad = load_dataset("flaviagiammarino/vqa-rad", split="all")
+try:
+    vqarad = load_dataset("flaviagiammarino/vqa-rad", split="all")
+except Exception:
+    raw_ds = load_dataset("flaviagiammarino/vqa-rad")
+    if hasattr(raw_ds, "keys"):
+        vqarad = concatenate_datasets([raw_ds[s] for s in raw_ds.keys()])
+    else:
+        vqarad = raw_ds
+
 print(f"Total samples: {len(vqarad)}")
 print("Sample keys  :", vqarad.column_names)
 vqarad[0]
@@ -353,10 +366,13 @@ class NeuroVQAModel(nn.Module):
         self.num_classes = num_classes
 
         # ── Visual encoder (BiomedCLIP) ───────────────────────────────────────
-        clip_model, _, _ = open_clip.create_model_and_transforms(
-            "ViT-B-16",
-            pretrained="openai",    # fallback; BiomedCLIP weights loaded separately
-        )
+        try:
+            clip_model, _, _ = open_clip.create_model_and_transforms(CLIP_MODEL_NAME)
+            print(f"✅ Loaded BiomedCLIP weights ({CLIP_MODEL_NAME})")
+        except Exception as e:
+            print(f"⚠️ Could not load BiomedCLIP directly ({e}); falling back to ViT-B-16 openai.")
+            clip_model, _, _ = open_clip.create_model_and_transforms("ViT-B-16", pretrained="openai")
+
         # Use the visual tower only
         self.visual_encoder = clip_model.visual
         for p in self.visual_encoder.parameters():
@@ -420,7 +436,8 @@ class NeuroVQAModel(nn.Module):
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
         )
-        text_tokens = self.text_proj(text_out.last_hidden_state)   # (B, T, EMBED_DIM)
+        hidden = text_out.last_hidden_state if hasattr(text_out, "last_hidden_state") else text_out[0]
+        text_tokens = self.text_proj(hidden)   # (B, T, EMBED_DIM)
 
         # ── Cross-modal attention ─────────────────────────────────────────────
         fused = self.cross_attn(text_tokens, vis_tokens)           # (B, T, EMBED_DIM)
@@ -474,14 +491,28 @@ scheduler   = OneCycleLR(
 criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
 
+# ── Mixed precision & Scaler setup ──────────────────────────────────────────
+has_torch_amp = hasattr(torch, "amp") and hasattr(torch.amp, "autocast")
+
+def get_autocast_context(training: bool):
+    if not (training and torch.cuda.is_available()):
+        return torch.no_grad()
+    if has_torch_amp:
+        return torch.amp.autocast("cuda")
+    return torch.cuda.amp.autocast()
+
+if torch.cuda.is_available():
+    scaler = torch.amp.GradScaler("cuda") if has_torch_amp else torch.cuda.amp.GradScaler()
+else:
+    scaler = None
+
+
 # ── Helper functions ──────────────────────────────────────────────────────────
 def run_epoch(loader, training: bool):
     model.train(training)
     total_loss, correct, total = 0.0, 0, 0
 
-    ctx = torch.cuda.amp.autocast() if training else torch.no_grad()
-
-    with ctx:
+    with get_autocast_context(training):
         for images, encoded, labels in tqdm(loader, leave=False,
                                              desc="train" if training else "eval"):
             images  = images.to(DEVICE)
@@ -495,17 +526,24 @@ def run_epoch(loader, training: bool):
             if training:
                 optimizer.zero_grad()
 
-            with (torch.cuda.amp.autocast() if training else torch.no_grad()):
+            with get_autocast_context(training):
                 logits = model(images, ids, mask, ttype)
                 loss   = criterion(logits, labels)
 
             if training:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
-                scaler.step(optimizer)
-                scaler.update()
-                scheduler.step()
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+                    optimizer.step()
+
+                if scheduler.last_epoch < total_steps:
+                    scheduler.step()
 
             total_loss += loss.item() * images.size(0)
             preds       = logits.argmax(dim=1)
@@ -516,7 +554,6 @@ def run_epoch(loader, training: bool):
 
 
 # ── Training ──────────────────────────────────────────────────────────────────
-scaler = torch.cuda.amp.GradScaler()
 
 history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": []}
 best_val_acc  = 0.0
@@ -793,6 +830,14 @@ if size_mb <= 80:
     print("✅ NFR: Adapter size ≤ 80 MB — PASS")
 else:
     print(f"⚠️  Adapter size {size_mb:.1f} MB > 80 MB — consider reducing LoRA rank")
+
+# Optional: Trigger direct browser download in Google Colab
+try:
+    from google.colab import files
+    print("\\nInitiating direct browser download ...")
+    files.download(FINAL_WEIGHTS)
+except Exception:
+    print(f"\\nCheck your Google Drive or local folder to access: {FINAL_WEIGHTS}")
 """),
 
 # ── SECTION 14 : DOWNLOAD INSTRUCTIONS ────────────────────────────────────────
