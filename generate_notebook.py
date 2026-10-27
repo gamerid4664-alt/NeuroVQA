@@ -56,6 +56,7 @@ if torch.cuda.is_available():
 md("## 2 · Install Training Dependencies"),
 code("""\
 %%capture
+!pip uninstall -y torchao
 !pip install -q open_clip_torch>=2.24.0
 !pip install -q transformers>=4.38.0
 !pip install -q peft>=0.8.0
