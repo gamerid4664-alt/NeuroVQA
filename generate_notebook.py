@@ -116,11 +116,11 @@ LORA_TARGET      = ["query", "value"]          # BERT attention projections
 # ── Training ───────────────────────────────────────────────────────────────────
 BATCH_SIZE       = 16
 NUM_EPOCHS       = 15
-LR               = 3e-4
-WEIGHT_DECAY     = 1e-4
-WARMUP_STEPS     = 50
-GRAD_CLIP        = 1.0
-EARLY_STOP_PAT   = 4                           # patience epochs
+LR               = 8e-5                        # Calibrated stable LR for LoRA + BERT (prevents divergence)
+WEIGHT_DECAY     = 1e-2                        # L2 regularization for AdamW
+WARMUP_STEPS     = 80                          # Gentle warmup steps
+GRAD_CLIP        = 0.5                         # Tighter gradient clipping to prevent gradient spikes
+EARLY_STOP_PAT   = 6                           # Patience epochs
 SEED             = 42
 
 # ── Runtime ────────────────────────────────────────────────────────────────────
@@ -174,14 +174,20 @@ vqarad[0]
 """),
 
 code("""\
-# ── 6.2  Inspect answer distribution ─────────────────────────────────────────
+# ── 6.2  Filter clean clinical questions (CLOSED / Yes-No / Anatomical) ─────
 from collections import Counter
 
-# Focus on CLOSED questions (yes/no/which/what) — easier classification
-closed_types = {"CLOSED"}
-all_answers   = [ex["answer"].strip().lower() for ex in vqarad
-                 if ex.get("answer_type") in closed_types or True]
+# Focus on clean CLOSED clinical questions (standard VQA-RAD benchmark)
+all_closed = [
+    ex for ex in vqarad
+    if str(ex.get("answer_type", "")).upper() in ["CLOSED", "YES/NO"] or ex["answer"].strip().lower() in ["yes", "no"]
+]
+if len(all_closed) < 500:
+    all_closed = [ex for ex in vqarad if len(ex["answer"].strip().split()) <= 3]
 
+print(f"Clean clinical questions: {len(all_closed)}/{len(vqarad)}")
+
+all_answers = [ex["answer"].strip().lower() for ex in all_closed]
 top_answers = Counter(all_answers).most_common(30)
 print("Top-30 answers:")
 for ans, cnt in top_answers:
@@ -190,11 +196,9 @@ for ans, cnt in top_answers:
 
 code("""\
 # ── 6.3  Build answer vocabulary (top-N answers) ─────────────────────────────
-MAX_ANSWERS = 58       # covers >95% of VQA-RAD closed answers
+MAX_ANSWERS = 36       # Covers clean clinical answers with high sample support
 
-answer_counter = Counter(
-    ex["answer"].strip().lower() for ex in vqarad
-)
+answer_counter = Counter(all_answers)
 most_common = [ans for ans, _ in answer_counter.most_common(MAX_ANSWERS)]
 
 class_to_idx = {ans: i for i, ans in enumerate(most_common)}
@@ -273,27 +277,17 @@ class VQARADDataset(Dataset):
 # ── Split 80 / 10 / 10 ───────────────────────────────────────────────────────
 from sklearn.model_selection import train_test_split
 
-all_valid = list(range(len(vqarad)))
-labels    = [
-    class_to_idx.get(vqarad[i]["answer"].strip().lower(), -1)
-    for i in all_valid
+valid_samples = [
+    ex for ex in all_closed
+    if ex["answer"].strip().lower() in class_to_idx
 ]
-# keep only in-vocab
-valid_mask = [i for i, l in zip(all_valid, labels) if l != -1]
 
-train_idx, temp_idx = train_test_split(valid_mask, test_size=0.2, random_state=SEED)
-val_idx,   test_idx = train_test_split(temp_idx,   test_size=0.5, random_state=SEED)
+train_samples, temp_samples = train_test_split(valid_samples, test_size=0.2, random_state=SEED)
+val_samples,   test_samples = train_test_split(temp_samples,  test_size=0.5, random_state=SEED)
 
-from torch.utils.data import Subset
-full_hf = vqarad  # keep reference
-
-# We'll build datasets by subsetting
-train_ds = VQARADDataset(
-    [vqarad[i] for i in train_idx], class_to_idx, get_image_transform(train=True))
-val_ds   = VQARADDataset(
-    [vqarad[i] for i in val_idx],   class_to_idx, get_image_transform(train=False))
-test_ds  = VQARADDataset(
-    [vqarad[i] for i in test_idx],  class_to_idx, get_image_transform(train=False))
+train_ds = VQARADDataset(train_samples, class_to_idx, get_image_transform(train=True))
+val_ds   = VQARADDataset(val_samples,   class_to_idx, get_image_transform(train=False))
+test_ds  = VQARADDataset(test_samples,  class_to_idx, get_image_transform(train=False))
 
 print(f"Train: {len(train_ds)}  Val: {len(val_ds)}  Test: {len(test_ds)}")
 """),
@@ -381,6 +375,7 @@ class NeuroVQAModel(nn.Module):
 
         self.visual_proj = nn.Sequential(
             nn.Linear(512, EMBED_DIM),
+            nn.LayerNorm(EMBED_DIM),
             nn.GELU(),
             nn.Dropout(DROPOUT),
         )
@@ -401,6 +396,7 @@ class NeuroVQAModel(nn.Module):
 
         self.text_proj = nn.Sequential(
             nn.Linear(768, EMBED_DIM),
+            nn.LayerNorm(EMBED_DIM),
             nn.GELU(),
             nn.Dropout(DROPOUT),
         )
@@ -443,8 +439,12 @@ class NeuroVQAModel(nn.Module):
         # ── Cross-modal attention ─────────────────────────────────────────────
         fused = self.cross_attn(text_tokens, vis_tokens)           # (B, T, EMBED_DIM)
 
-        # ── Pool text tokens ──────────────────────────────────────────────────
-        pooled = fused.mean(dim=1)                                  # (B, EMBED_DIM)
+        # ── Attention-masked sequence pooling (ignores [PAD] tokens) ──────────
+        if attention_mask is not None:
+            mask_exp = attention_mask.unsqueeze(-1).expand_as(fused).float()
+            pooled   = (fused * mask_exp).sum(dim=1) / mask_exp.sum(dim=1).clamp(min=1e-8)
+        else:
+            pooled   = fused.mean(dim=1)                                # (B, EMBED_DIM)
 
         # ── Classify ──────────────────────────────────────────────────────────
         logits = self.fusion_head(pooled)                           # (B, num_classes)

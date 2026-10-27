@@ -71,11 +71,13 @@ class NeuroVQAFusionModel(nn.Module if HAS_TORCH else object):
         super().__init__()
         self.visual_proj = nn.Sequential(
             nn.Linear(embed_dim, embed_dim),
+            nn.LayerNorm(embed_dim),
             nn.GELU(),
             nn.Dropout(0.1),
         )
         self.text_proj = nn.Sequential(
             nn.Linear(embed_dim, embed_dim),
+            nn.LayerNorm(embed_dim),
             nn.GELU(),
             nn.Dropout(0.1),
         )
