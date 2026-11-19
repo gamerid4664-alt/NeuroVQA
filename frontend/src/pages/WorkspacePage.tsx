@@ -26,7 +26,7 @@ export default function WorkspacePage() {
   const [selectedDemoId, setSelectedDemoId] = useState<string>("case1");
   const [intakeMode, setIntakeMode] = useState<"2d" | "25d">("2d");
   const [question, setQuestion] = useState<string>(
-    "Is there an acute infarct present in the cerebral cortex?"
+    "Is there a tumor present?"
   );
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [multiSliceFiles, setMultiSliceFiles] = useState<File[]>([]);
@@ -151,19 +151,25 @@ export default function WorkspacePage() {
         } catch {
           // Fallback if backend is offline
           const matchedDemo = DEMO_CASES.find((c) => c.id === selectedDemoId) || DEMO_CASES[0];
-          const isNormal = matchedDemo.expected_answer === "NORMAL";
+          const demoConf = matchedDemo.confidence || 0.88;
           const simDiagnosis: Diagnosis = {
             id: Math.floor(Math.random() * 9000) + 1000,
             question: question,
             answer: matchedDemo.expected_answer,
-            confidence: isNormal ? 0.942 : 0.876,
+            confidence: demoConf,
             status: matchedDemo.status,
             latency_seconds: Number(((performance.now() - startTime) / 1000).toFixed(2)),
             top_3_predictions: [
-              { answer: matchedDemo.expected_answer, confidence: isNormal ? 0.942 : 0.876 },
-              { answer: isNormal ? "UNCERTAIN" : "NORMAL", confidence: isNormal ? 0.041 : 0.082 },
-              { answer: isNormal ? "ARTIFACT" : "MICROVASCULAR DISEASE", confidence: isNormal ? 0.017 : 0.042 },
+              { answer: matchedDemo.expected_answer, confidence: demoConf },
+              { answer: matchedDemo.expected_answer === "Normal" ? "No" : "Normal", confidence: Number(Math.max(0.01, (1.0 - demoConf) * 0.7).toFixed(3)) },
+              { answer: "Uncertain", confidence: Number(Math.max(0.01, (1.0 - demoConf) * 0.3).toFixed(3)) },
             ],
+            top3: [
+              { answer: matchedDemo.expected_answer, confidence: demoConf },
+              { answer: matchedDemo.expected_answer === "Normal" ? "No" : "Normal", confidence: Number(Math.max(0.01, (1.0 - demoConf) * 0.7).toFixed(3)) },
+              { answer: "Uncertain", confidence: Number(Math.max(0.01, (1.0 - demoConf) * 0.3).toFixed(3)) },
+            ],
+            focused_region: matchedDemo.id === "case1" ? "Left Temporal / Parietal territory" : (matchedDemo.id === "case3" ? "Right Frontal / Anterior Cortical region" : "Symmetrical Normal Parenchyma"),
             mri_url: imagePreview || undefined,
             heatmap_url: heatmapPreview || undefined,
             slice_mode: intakeMode === "25d" ? "2.5D Volumetric Stack (3 Contiguous Axial Slices)" : "2D Single Axial Slice",
@@ -175,19 +181,25 @@ export default function WorkspacePage() {
     } catch (err: any) {
       console.warn("Backend predict failed, fallback to offline demo result:", err);
       const matchedDemo = DEMO_CASES.find((c) => c.id === selectedDemoId) || DEMO_CASES[0];
-      const isNormal = matchedDemo.expected_answer === "NORMAL";
+      const demoConf = matchedDemo.confidence || 0.88;
       const simDiagnosis: Diagnosis = {
         id: Math.floor(Math.random() * 9000) + 1000,
         question: question,
         answer: matchedDemo.expected_answer,
-        confidence: isNormal ? 0.938 : 0.865,
+        confidence: demoConf,
         status: matchedDemo.status,
         latency_seconds: Number(((performance.now() - startTime) / 1000).toFixed(2)),
         top_3_predictions: [
-          { answer: matchedDemo.expected_answer, confidence: isNormal ? 0.938 : 0.865 },
-          { answer: "NORMAL", confidence: 0.091 },
-          { answer: "UNCERTAIN", confidence: 0.044 },
+          { answer: matchedDemo.expected_answer, confidence: demoConf },
+          { answer: matchedDemo.expected_answer === "Normal" ? "No" : "Normal", confidence: Number(Math.max(0.01, (1.0 - demoConf) * 0.7).toFixed(3)) },
+          { answer: "Uncertain", confidence: Number(Math.max(0.01, (1.0 - demoConf) * 0.3).toFixed(3)) },
         ],
+        top3: [
+          { answer: matchedDemo.expected_answer, confidence: demoConf },
+          { answer: matchedDemo.expected_answer === "Normal" ? "No" : "Normal", confidence: Number(Math.max(0.01, (1.0 - demoConf) * 0.7).toFixed(3)) },
+          { answer: "Uncertain", confidence: Number(Math.max(0.01, (1.0 - demoConf) * 0.3).toFixed(3)) },
+        ],
+        focused_region: matchedDemo.id === "case1" ? "Left Temporal / Parietal territory" : (matchedDemo.id === "case3" ? "Right Frontal / Anterior Cortical region" : "Symmetrical Normal Parenchyma"),
         mri_url: imagePreview || undefined,
         heatmap_url: heatmapPreview || undefined,
         slice_mode: intakeMode === "25d" ? "2.5D Volumetric Stack (3 Contiguous Axial Slices)" : "2D Single Axial Slice",
@@ -364,11 +376,13 @@ export default function WorkspacePage() {
           />
 
           <div className="mt-2 space-y-1">
-            <div className="text-[10px] text-[#64748B] font-semibold">Suggested Questions:</div>
+            <div className="text-[10px] text-[#64748B] font-semibold">Suggested Questions (15 Clinical Classes):</div>
             {[
-              "Is there an acute infarct present?",
-              "Are the lateral ventricles enlarged?",
-              "What pathological condition is indicated?",
+              "Is there a tumor present?",
+              "Is there an abnormality present?",
+              "What type of tumor is indicated?",
+              "Which side is abnormality on?",
+              "Which lobe is affected?",
             ].map((q) => (
               <button
                 key={q}

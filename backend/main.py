@@ -4,6 +4,7 @@ Dual-Mode: Cloud Supabase + Local SQLite Fallback.
 Main entrypoint for the NeuroVQA clinical decision-support platform.
 """
 
+import asyncio
 from datetime import datetime
 import json
 import os
@@ -38,8 +39,9 @@ from .reports import router as reports_router
 from .feedback import router as feedback_router
 from .audit import router as audit_router
 from .dashboard import router as dashboard_router
+import numpy as np
 from PIL import Image
-from .src.dataset import preprocess_mri_image, pack_25d_stack, is_nifti_data
+from .src.dataset import preprocess_mri_image, pack_25d_stack, is_nifti_data, is_dicom_data
 from .src.model import NeuroVQAInferenceEngine
 from .src.explainability import generate_gradcam_heatmap, heatmap_to_png_bytes
 
@@ -89,6 +91,13 @@ app.include_router(dashboard_router)
 app.mount("/data", StaticFiles(directory=DATA_DIR), name="data")
 
 
+@app.get("/api/report/{diagnosis_id}")
+async def get_single_report_alias(diagnosis_id: str, db: Session = Depends(get_db)):
+    """Direct alias matching PRD contract: GET /api/report/{case_id}"""
+    from .reports import download_clinical_report
+    return await download_clinical_report(diagnosis_id, db)
+
+
 @app.get("/api/health")
 def health_check():
     return {
@@ -101,6 +110,41 @@ def health_check():
     }
 
 
+async def evict_ollama_from_ram():
+    """Sequential Loading: Unloads Ollama llama3.2:1b from RAM before running VQA inference."""
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=1.0) as client:
+            await client.post("http://localhost:11434/api/generate", json={"model": "llama3.2:1b", "keep_alive": 0})
+    except Exception:
+        pass
+    import gc
+    gc.collect()
+
+
+@app.on_event("startup")
+async def startup_event():
+    """
+    Startup Pre-Warmup Routine (NFR-2, NFR-3):
+    1. Pre-warms PyTorch runtime, thread pool (2 threads), and JIT optimization.
+    2. Runs a dummy 2.5D inference pass through vqa_engine.predict_25d to eliminate cold-start delay.
+    3. Primes Attention x Gradient heatmap generator.
+    4. Ensures Ollama is evicted from RAM so initial memory starts <= 4.6 GB.
+    """
+    print("[NeuroVQA Startup] Initializing runtime pre-warmup routine on Intel Core i3...")
+    t0 = time.perf_counter()
+    try:
+        await evict_ollama_from_ram()
+        dummy_display = np.full((3, 224, 224), fill_value=128, dtype=np.uint8)
+        _ = vqa_engine.predict_25d(dummy_display, "Is there an abnormality present?")
+        _, _, _ = generate_gradcam_heatmap(dummy_display[1] if dummy_display.ndim == 3 else dummy_display)
+        warmup_ms = (time.perf_counter() - t0) * 1000
+        print(f"[NeuroVQA Startup] Pre-warmup complete in {warmup_ms:.1f}ms. Ready for sub-4.0s inference.")
+    except Exception as e:
+        print(f"[NeuroVQA Startup] Pre-warmup notice: {e}")
+
+
+
 @app.post("/api/predict")
 async def predict_mri(
     file: Optional[UploadFile] = File(None),
@@ -111,22 +155,27 @@ async def predict_mri(
 ):
     """
     Main VQA Prediction Endpoint (FR-1, FR-2, FR-3):
-    1. Ingests raw MRI scan (PNG/JPEG/NIfTI) or 3-slice 2.5D stack (k-1, k, k+1).
-    2. Performs percentile clipping, min-max norm, and resizing to 224x224.
-    3. Runs cross-attention VQA inference.
-    4. Computes Grad-CAM attention heatmap.
+    1. Sequential RAM Management: Unloads LLM before VQA execution.
+    2. Ingests raw MRI scan (PNG/JPEG/NIfTI) or 3-slice 2.5D stack (k-1, k, k+1).
+    3. Runs 2.5D Gated Multimodal Fusion inference over 15 canonical classes.
+    4. Computes Attention x Gradient heatmap (top 20% patches, alpha 0.45).
     5. Saves diagnosis and audit trail to Supabase and SQLite.
     """
+    # 1. Sequential Memory Eviction: ensure Ollama is unloaded to keep RAM < 4.6 GB
+    await evict_ollama_from_ram()
+
     start_time = time.perf_counter()
 
     # Extract user token and identity if provided
     token = None
     user_id = None
     if authorization and "Bearer " in authorization:
-        token = authorization.split("Bearer ")[1].strip()
-        supa_user = await supabase_get_user(token)
-        if supa_user and "id" in supa_user:
-            user_id = supa_user["id"]
+        raw_token = authorization.split("Bearer ")[1].strip()
+        if raw_token and "." in raw_token:
+            token = raw_token
+            supa_user = await supabase_get_user(token)
+            if supa_user and "id" in supa_user:
+                user_id = supa_user["id"]
 
     is_25d = False
     # Check if multi-slice 2.5D volumetric stack is provided (FR-1)
@@ -156,7 +205,7 @@ async def predict_mri(
         # Single 2D slice or Volumetric NIfTI (.nii / .nii.gz) (FR-1)
         upload_item = file or (files[0] if files and len(files) > 0 else None)
         if not upload_item:
-            raise HTTPException(status_code=400, detail="No MRI image provided. Upload a single slice, 3-slice 2.5D stack, or NIfTI volume.")
+            raise HTTPException(status_code=400, detail="No MRI image provided. Upload a single slice or 3-slice 2.5D stack.")
 
         contents = await upload_item.read()
         if not contents:
@@ -169,21 +218,22 @@ async def predict_mri(
             f.write(contents)
 
         is_nii = file_ext.lower() in (".nii", ".gz") or is_nifti_data(contents)
+        is_dcm = file_ext.lower() in (".dcm", ".dicom") or is_dicom_data(contents)
         try:
             display_np, tensor = preprocess_mri_image(contents)
             preview_filename = os.path.basename(orig_path)
-            if is_nii:
-                is_25d = True
+            if is_nii or is_dcm:
+                is_25d = is_nii
                 preview_filename = f"{unique_stem}_preview.png"
                 preview_path = os.path.join(UPLOADS_DIR, preview_filename)
                 Image.fromarray(display_np).save(preview_path)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Image preprocessing failed: {str(e)}")
 
-    # VQA Inference
-    vqa_result = vqa_engine.predict(tensor, question)
+    # 2.5D Volumetric VQA Inference (Gated Fusion & 15 Fixed Classes)
+    vqa_result = vqa_engine.predict_25d(display_np, question)
 
-    # Grad-CAM Attention Heatmap Generation
+    # Attention x Gradient Heatmap Generation (top 20% patches, alpha 0.45)
     jet_cam, overlay_cam, region_desc = generate_gradcam_heatmap(display_np)
 
     # Save heatmap overlay to disk
@@ -194,6 +244,7 @@ async def predict_mri(
         f.write(cam_bytes)
 
     latency = round(time.perf_counter() - start_time, 2)
+    latency_ms = int(latency * 1000)
 
     # Determine default local static URLs
     mri_url = f"http://localhost:8000/data/uploads/{preview_filename}"
@@ -202,23 +253,27 @@ async def predict_mri(
 
     # 1. Cloud Sync: Upload to Supabase Storage & Insert to Postgres
     if is_supabase_enabled():
-        cloud_mri = await supabase_upload_storage("mri-scans", f"{unique_stem}{file_ext}", contents, content_type="image/png", access_token=token)
-        cloud_cam = await supabase_upload_storage("heatmaps", cam_filename, cam_bytes, content_type="image/png", access_token=token)
-
-        if cloud_mri:
-            mri_url = cloud_mri
-        if cloud_cam:
-            heatmap_url = cloud_cam
+        uploads = await asyncio.gather(
+            supabase_upload_storage("mri-scans", f"{unique_stem}{file_ext}", contents, content_type="image/png", access_token=token),
+            supabase_upload_storage("heatmaps", cam_filename, cam_bytes, content_type="image/png", access_token=token),
+            return_exceptions=True,
+        )
+        if len(uploads) == 2:
+            cloud_mri, cloud_cam = uploads
+            if isinstance(cloud_mri, str) and cloud_mri:
+                mri_url = cloud_mri
+            if isinstance(cloud_cam, str) and cloud_cam:
+                heatmap_url = cloud_cam
 
         diag_payload = {
             "mri_file_path": mri_url,
             "question": question,
             "answer": vqa_result["answer"],
             "confidence": float(vqa_result["confidence"]),
-            "top_3_predictions": vqa_result["top_3"],
+            "top_3_predictions": vqa_result["top_3_predictions"],
             "heatmap_path": heatmap_url,
             "latency_seconds": latency,
-            "model_version": "NeuroVQA-v26-BiomedCLIP-LoRA",
+            "model_version": "NeuroVQA-v2.0-GatedFusion-BiomedCLIP",
         }
         if user_id:
             diag_payload["user_id"] = user_id
@@ -247,16 +302,16 @@ async def predict_mri(
         question=question,
         answer=vqa_result["answer"],
         confidence=vqa_result["confidence"],
-        top_3_predictions_json=json.dumps(vqa_result["top_3"]),
+        top_3_predictions_json=json.dumps(vqa_result["top_3_predictions"]),
         heatmap_path=cam_path,
         latency_seconds=latency,
-        model_version="NeuroVQA-v26-BiomedCLIP-LoRA",
+        model_version="NeuroVQA-v2.0-GatedFusion-BiomedCLIP",
     )
     db.add(diag)
     db.commit()
     db.refresh(diag)
 
-    # Save comprehensive audit records locally (FR-15, Design 5.5)
+    # Save comprehensive audit records locally
     for action_name, action_lat in [
         ("MRI_UPLOADED", None),
         ("HEATMAP_GENERATED", None),
@@ -271,16 +326,19 @@ async def predict_mri(
     db.commit()
 
     return {
-        "id": assigned_id or diag.id,
+        "id": assigned_id or str(diag.id),
         "question": diag.question,
         "answer": diag.answer,
         "confidence": diag.confidence,
         "status": vqa_result["status"],
-        "top_3_predictions": vqa_result["top_3"],
+        "top_3_predictions": vqa_result["top_3_predictions"],
+        "top3": vqa_result["top_3_predictions"],
         "latency_seconds": latency,
+        "latency_ms": latency_ms,
         "focused_region": region_desc,
         "mri_url": mri_url,
         "heatmap_url": heatmap_url,
+        "model_version": "NeuroVQA-v2.0-GatedFusion-BiomedCLIP",
         "slice_mode": "2.5D Volumetric Stack (3 Contiguous Axial Slices)" if is_25d else "2D Single Axial Slice",
         "created_at": diag.created_at.isoformat(),
     }

@@ -21,9 +21,11 @@ load_dotenv()
 logger = logging.getLogger("neurovqa.supabase")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
-SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_PUBLISHABLE_KEY", "")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_KEY = SUPABASE_SERVICE_KEY or os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_PUBLISHABLE_KEY", "")
 USE_SUPABASE = os.getenv("USE_SUPABASE", "true").lower() in ("true", "1", "yes")
-TIMEOUT = 10.0
+TIMEOUT = 4.0
+AUTH_TIMEOUT = 2.0
 
 
 def is_supabase_enabled() -> bool:
@@ -31,7 +33,18 @@ def is_supabase_enabled() -> bool:
 
 
 def _get_headers(access_token: Optional[str] = None, extra: Optional[Dict] = None) -> Dict[str, str]:
-    token = access_token or SUPABASE_KEY
+    token = SUPABASE_KEY
+    if access_token and access_token.count(".") == 2:
+        try:
+            import base64
+            payload_seg = access_token.split(".")[1]
+            padded = payload_seg + "=" * ((4 - len(payload_seg) % 4) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(padded))
+            if "supabase" in claims.get("iss", ""):
+                token = access_token
+        except Exception:
+            token = SUPABASE_KEY
+
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {token}",
@@ -60,7 +73,7 @@ async def supabase_signup(email: str, password: str, full_name: str = "", specia
         },
     }
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=AUTH_TIMEOUT) as client:
             resp = await client.post(url, json=payload, headers=_get_headers())
             if resp.status_code in (200, 201):
                 return resp.json()
@@ -78,7 +91,7 @@ async def supabase_login(email: str, password: str) -> Optional[Dict]:
     url = f"{SUPABASE_URL}/auth/v1/token?grant_type=password"
     payload = {"email": email, "password": password}
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=AUTH_TIMEOUT) as client:
             resp = await client.post(url, json=payload, headers=_get_headers())
             if resp.status_code == 200:
                 return resp.json()
@@ -129,14 +142,26 @@ async def supabase_upload_storage(
     if not is_supabase_enabled():
         return None
     url = f"{SUPABASE_URL}/storage/v1/object/{bucket}/{filename}"
+    valid_token = SUPABASE_KEY
+    if access_token and access_token.count(".") == 2:
+        try:
+            import base64
+            payload_seg = access_token.split(".")[1]
+            padded = payload_seg + "=" * ((4 - len(payload_seg) % 4) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(padded))
+            if "supabase" in claims.get("iss", ""):
+                valid_token = access_token
+        except Exception:
+            valid_token = SUPABASE_KEY
+
     headers = {
         "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {access_token or SUPABASE_KEY}",
+        "Authorization": f"Bearer {valid_token}",
         "Content-Type": content_type,
         "x-upsert": "true",
     }
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(url, content=file_bytes, headers=headers)
             if resp.status_code in (200, 201):
                 public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{filename}"

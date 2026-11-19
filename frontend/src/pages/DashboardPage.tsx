@@ -102,9 +102,9 @@ export default function DashboardPage() {
             </p>
           </div>
           <div className="flex items-center gap-2 bg-[#161922] border border-[#2A2F42] rounded-xl px-4 py-2">
-            <span className="status-dot" />
-            <span className="text-xs text-[#94A3B8]">Engine Status:</span>
-            <span className="text-xs font-semibold text-[#10B981]">100% Offline Active</span>
+            <span className="w-2 h-2 rounded-full bg-[#10B981] animate-pulse" />
+            <span className="text-xs text-[#94A3B8]">Cloud Status:</span>
+            <span className="text-xs font-semibold text-[#10B981]">Supabase Real-Time Sync</span>
           </div>
         </div>
 

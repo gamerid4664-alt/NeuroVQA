@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import {
   Brain,
@@ -6,8 +7,8 @@ import {
   LogOut,
   Menu,
   X,
-  Activity,
   ChevronRight,
+  Cloud,
 } from "lucide-react";
 import { useAppStore } from "../store";
 
@@ -21,6 +22,20 @@ export default function Navbar() {
   const { user, logout, sidebarOpen, setSidebarOpen } = useAppStore();
   const navigate = useNavigate();
   const loc = useLocation();
+  const [onlineMode, setOnlineMode] = useState<string>("Supabase Cloud");
+
+  useEffect(() => {
+    fetch("http://localhost:8000/api/health")
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.mode === "supabase-hybrid") {
+          setOnlineMode("Supabase Live Cloud");
+        } else {
+          setOnlineMode("Offline Local");
+        }
+      })
+      .catch(() => setOnlineMode("Local SQLite"));
+  }, []);
 
   const handleLogout = () => {
     logout();
@@ -69,9 +84,9 @@ export default function Navbar() {
       {/* Status + User */}
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-1.5 text-xs text-[#94A3B8] border border-[#2A2F42] rounded-full px-3 py-1 bg-[#0E1117]">
-          <span className="status-dot scale-75" />
-          <Activity size={11} className="text-[#10B981]" />
-          <span className="text-[#10B981] font-medium">Offline Engine</span>
+          <span className="w-2 h-2 rounded-full bg-[#10B981] animate-pulse" />
+          <Cloud size={12} className="text-[#10B981]" />
+          <span className="text-[#10B981] font-medium">{onlineMode}</span>
         </div>
         {user && (
           <div className="flex items-center gap-2">

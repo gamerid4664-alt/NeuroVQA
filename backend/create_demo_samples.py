@@ -1,3 +1,11 @@
+"""
+NeuroVQA — Demo MRI Case Generator (Version 2.0)
+Generates the 3 canonical demo cases:
+- Case 1: Clear Tumor (Glioblastoma, high confidence ~0.92)
+- Case 2: Normal Scan (Unremarkable brain MRI, confidence ~0.89)
+- Case 3: Uncertain / Small lesion (Faint 3mm non-specific hyperintensity, confidence ~0.55)
+"""
+
 import os
 import numpy as np
 from PIL import Image, ImageFilter
@@ -25,39 +33,28 @@ def create_base_mri():
     img[v_right] = 20.0
     return img
 
-# 1. Ischemic Stroke
+# Case 1: Clear Tumor (Glioblastoma in left temporal/parietal region)
 mri1 = create_base_mri()
-infarct = ((x - 158)**2) / 18**2 + ((y - 115)**2) / 24**2 <= 1.0
-mri1[infarct] = np.clip(mri1[infarct] + 65.0, 0, 255)
-Image.fromarray(np.clip(mri1, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8)).save(os.path.join(demo_dir, "case1_ischemic_stroke.png"))
-Image.fromarray(np.clip(mri1, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8)).save(os.path.join(demo_dir, "case1.png"))
+gb_outer = ((x - 95)**2) / 26**2 + ((y - 148)**2) / 24**2 <= 1.0
+gb_inner = ((x - 95)**2) / 14**2 + ((y - 148)**2) / 12**2 <= 1.0
+mri1[gb_outer] = 230.0
+mri1[gb_inner] = 65.0
+c1_img = Image.fromarray(np.clip(mri1, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8))
+c1_img.save(os.path.join(demo_dir, "case1.png"))
+c1_img.save(os.path.join(demo_dir, "case1_clear_tumor.png"))
 
-# 2. Hydrocephalus
+# Case 2: Normal Scan (Symmetrical unremarkable parenchymal contours)
 mri2 = create_base_mri()
-v_dil_l = ((x - 110)**2) / 24**2 + ((y - 120)**2) / 45**2 <= 1.0
-v_dil_r = ((x - 146)**2) / 24**2 + ((y - 120)**2) / 45**2 <= 1.0
-mri2[v_dil_l] = 20.0
-mri2[v_dil_r] = 20.0
-Image.fromarray(np.clip(mri2, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8)).save(os.path.join(demo_dir, "case2_hydrocephalus.png"))
-Image.fromarray(np.clip(mri2, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8)).save(os.path.join(demo_dir, "case2.png"))
+c2_img = Image.fromarray(np.clip(mri2, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8))
+c2_img.save(os.path.join(demo_dir, "case2.png"))
+c2_img.save(os.path.join(demo_dir, "case2_normal_scan.png"))
 
-# 3. Normal Brain
+# Case 3: Uncertain / Small Lesion (Faint 3mm focal white-matter signal)
 mri3 = create_base_mri()
-Image.fromarray(np.clip(mri3, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8)).save(os.path.join(demo_dir, "case3_normal_brain.png"))
-Image.fromarray(np.clip(mri3, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8)).save(os.path.join(demo_dir, "case3.png"))
+faint_lesion = ((x - 150)**2) / 4**2 + ((y - 105)**2) / 4**2 <= 1.0
+mri3[faint_lesion] = np.clip(mri3[faint_lesion] + 35.0, 0, 255)
+c3_img = Image.fromarray(np.clip(mri3, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8))
+c3_img.save(os.path.join(demo_dir, "case3.png"))
+c3_img.save(os.path.join(demo_dir, "case3_uncertain_small_lesion.png"))
 
-# 4. Subdural Hematoma
-mri4 = create_base_mri()
-crescent = (((x - 128)**2) / 84**2 + ((y - 128)**2) / 104**2 <= 1.0) & (((x - 128)**2) / 72**2 + ((y - 128)**2) / 92**2 > 1.0) & (x < 120)
-mri4[crescent] = 220.0
-Image.fromarray(np.clip(mri4, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8)).save(os.path.join(demo_dir, "case4_subdural_hematoma.png"))
-
-# 5. Glioblastoma
-mri5 = create_base_mri()
-gb_outer = ((x - 95)**2) / 25**2 + ((y - 150)**2) / 22**2 <= 1.0
-gb_inner = ((x - 95)**2) / 14**2 + ((y - 150)**2) / 12**2 <= 1.0
-mri5[gb_outer] = 230.0
-mri5[gb_inner] = 60.0
-Image.fromarray(np.clip(mri5, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.8)).save(os.path.join(demo_dir, "case5_glioblastoma.png"))
-
-print(f"Generated 5 demo MRI scans in: {demo_dir}")
+print(f"Generated 3 canonical demo MRI cases in: {demo_dir}")

@@ -13,8 +13,11 @@ export interface Diagnosis {
   answer: string;
   confidence: number;
   top_3_predictions: Array<{ answer: string; confidence: number }>;
+  top3?: Array<{ answer: string; confidence: number }>;
   status: string;
   latency_seconds: number;
+  latency_ms?: number;
+  focused_region?: string;
   mri_url?: string;
   heatmap_url?: string;
   slice_mode?: string;

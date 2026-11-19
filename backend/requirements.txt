@@ -29,6 +29,7 @@ matplotlib>=3.8.0
 numpy>=1.24.0
 SimpleITK>=2.3.1
 nibabel>=5.0.0
+pydicom>=3.0.0
 
 # PDF Clinical Report Generation
 reportlab>=4.1.0

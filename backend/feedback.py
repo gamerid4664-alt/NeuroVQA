@@ -21,13 +21,17 @@ router = APIRouter(prefix="/api/feedback", tags=["Feedback"])
 
 class FeedbackCreate(BaseModel):
     diagnosis_id: Union[int, str]
-    feedback_type: str  # correct | partially_correct | incorrect | uncertain
+    feedback_type: Optional[str] = None  # correct | partially_correct | incorrect | uncertain
+    feedback_rating: Optional[str] = None  # Alias for feedback_type
     doctor_note: Optional[str] = None
+    doctor_notes: Optional[str] = None  # Alias for doctor_note
 
 
 @router.post("")
 async def submit_feedback(data: FeedbackCreate, db: Session = Depends(get_db)):
-    feedback_type_clean = data.feedback_type.lower()
+    raw_rating = data.feedback_rating or data.feedback_type or "correct"
+    feedback_type_clean = raw_rating.strip().lower().replace(" ", "_")
+    note_clean = data.doctor_notes or data.doctor_note
     feedback_id = None
 
     # 1. Try Supabase insertion
@@ -35,7 +39,7 @@ async def submit_feedback(data: FeedbackCreate, db: Session = Depends(get_db)):
         supa_res = await supabase_insert_feedback({
             "diagnosis_id": str(data.diagnosis_id),
             "feedback_type": feedback_type_clean,
-            "doctor_note": data.doctor_note,
+            "doctor_note": note_clean,
         })
         if supa_res and "id" in supa_res:
             feedback_id = supa_res["id"]
@@ -53,7 +57,7 @@ async def submit_feedback(data: FeedbackCreate, db: Session = Depends(get_db)):
                 fb = DoctorFeedback(
                     diagnosis_id=diag_int_id,
                     feedback_type=feedback_type_clean,
-                    doctor_note=data.doctor_note,
+                    doctor_note=note_clean,
                 )
                 db.add(fb)
                 db.commit()

@@ -318,6 +318,7 @@ def build_pdf_report(diagnosis: Any, feedback: Optional[Any] = None) -> str:
     return pdf_path
 
 
+@router.get("/{diagnosis_id}")
 @router.get("/{diagnosis_id}/download")
 async def download_clinical_report(diagnosis_id: str, db: Session = Depends(get_db)):
     diag_record = None

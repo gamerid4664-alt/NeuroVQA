@@ -14,6 +14,7 @@ from .supabase_client import is_supabase_enabled, supabase_get_dashboard_stats
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
 
 
+@router.get("")
 @router.get("/stats")
 async def get_dashboard_statistics(db: Session = Depends(get_db)):
     # 1. Try fetching from Supabase

@@ -1,254 +1,193 @@
-# Environment Setup & Execution Manual — NeuroVQA
+# Environment Setup & Execution Manual — NeuroVQA (Version 2.0)
 
-This manual describes the hybrid deployment setup for NeuroVQA:
-
-- **Google Colab / Kaggle T4 GPU** for dataset handling and LoRA fine-tuning.
-- **Local Intel i3 laptop (8 GB RAM, 512 GB SSD, integrated graphics)** for offline inference, real-time chat, dashboard, reports, history, feedback, and audit trail.
+**Target Profile:** Cloud Training (Google Colab T4 GPU) $\rightarrow$ Local Offline Inference (Intel Core i3 11th Gen, 8 GB RAM, 512 GB SSD, Integrated Graphics)  
+**Offline Invariant:** 100% offline-capable after local assets are installed. No cloud APIs during clinical inference.
 
 ---
 
-## 1. Deployment Architecture
+## 1. Cloud Training Pipeline (Google Colab T4 GPU)
 
-```text
-CLOUD TRAINING ENVIRONMENT                     LOCAL DOCTOR WORKSTATION
-+------------------------------+               +----------------------------------+
-| Google Colab / Kaggle T4 GPU |               | Intel Core i3 / 8 GB RAM laptop  |
-| - PyTorch CUDA               |               | - React + Vite frontend          |
-| - BiomedCLIP + PubMedBERT    | --Export-->   | - FastAPI backend                |
-| - PEFT / LoRA training       |   Adapter     | - PyTorch CPU inference          |
-| - VQA-RAD training           |   Weights     | - Ollama small local LLM         |
-| - No local GPU required      |               | - SQLite local database          |
-+------------------------------+               | - 100% offline after setup       |
-                                                +----------------------------------+
-```
+> ⚠️ **Hardware Directive:** All deep learning fine-tuning must be conducted in the cloud on a CUDA GPU (Google Colab free T4 runtime). **Never attempt model training on the local Intel i3 laptop.**
 
-**Important:** Do not train NeuroVQA on the local laptop. The local system is optimized only for lightweight CPU inference and the doctor-facing interface.
+### 1.1 Dataset Preparation & Automated Downloads
+Create a new Colab notebook (`train_colab.ipynb`) with GPU runtime (**Runtime $\rightarrow$ Change runtime type $\rightarrow$ T4 GPU**).
 
----
-
-## 2. Local Hardware Profile
-
-* Intel Core i3 11th Gen
-* 8 GB RAM
-* 512 GB SSD
-* Integrated graphics
-* Windows 64-bit
-* No dedicated GPU required
-
-Recommended local resource limits:
-
-| Component | Target |
-|---|---|
-| NeuroVQA VQA inference memory | < 2.5 GB |
-| Chat LLM | Small quantized 1B–3B model |
-| SQLite database | Local file |
-| Browser + React frontend | Lightweight production build preferred |
-| Concurrent heavy tasks | Avoid training, large browser tabs, and multiple LLM sessions |
-
----
-
-## 3. Project Directory Structure
-
-```text
-NeuroVQA/
-├── NeuroVQ-prd.md
-├── NeuroVQA-design.md
-├── NeuroVQA-setup.md
-├── backend/
-│   ├── main.py                 # FastAPI application
-│   ├── auth.py                 # JWT authentication
-│   ├── database.py             # SQLite + SQLAlchemy
-│   ├── chat.py                 # WebSocket chat and Ollama streaming
-│   ├── reports.py              # PDF report generation
-│   ├── feedback.py             # Doctor feedback endpoints
-│   ├── audit.py                # Audit trail service
-│   ├── dashboard.py            # Dashboard analytics endpoints
-│   ├── requirements.txt
-│   ├── checkpoints/
-│   │   ├── biomedclip/         # Local BiomedCLIP weights/config
-│   │   ├── pubmedbert/         # Local PubMedBERT model/tokenizer
-│   │   └── neurovqa_weights.pt # LoRA adapter checkpoint
-│   ├── data/
-│   │   ├── demo_samples/       # Curated MRI demo cases
-│   │   ├── reports/            # Generated PDF reports
-│   │   └── knowledge/          # Optional local RAG documents
-│   └── src/
-│       ├── __init__.py
-│       ├── dataset.py          # MRI preprocessing and 2.5D packing
-│       ├── model.py            # BiomedCLIP + cross-attention VQA
-│       ├── explainability.py   # Grad-CAM heatmap generation
-│       └── rag.py              # Optional local retrieval module
-├── frontend/
-│   ├── src/
-│   │   ├── pages/              # Home, Login, Signup, Workspace, Dashboard, History
-│   │   ├── components/         # Navbar, ChatPanel, MRIViewer, ResultPanel
-│   │   └── routes/             # React Router configuration
-│   ├── package.json
-│   └── vite.config.ts
-└── train_colab.ipynb
-```
-
----
-
-## 4. Backend Setup
-
-### 4.1 Create Python Environment
+Download and prepare the 4 composite datasets (~12,157 images, 35,000+ QA pairs):
 
 ```bash
+# 1. Install HuggingFace & Kaggle CLIs
+!pip install -q huggingface_hub kaggle datasets
+
+# 2. Download VQA-RAD (315 images, ~3.5k QA)
+from datasets import load_dataset
+ds_vqa_rad = load_dataset("flaviagiammarino/vqa-rad")
+ds_vqa_rad.save_to_disk("/content/data/vqa_rad")
+
+# 3. Download SLAKE (642 images, 14k QA with brain MRI subset)
+ds_slake = load_dataset("BoKelvin/SLAKE")
+ds_slake.save_to_disk("/content/data/slake")
+
+# 4. Download VQA-Med 2019 (4,200 images, 15k QA)
+!git clone https://github.com/abachaa/VQA-Med-2019 /content/data/vqa_med_2019
+
+# 5. Download Kaggle Brain Tumor MRI Dataset (7,000 high-res scans)
+# Ensure kaggle.json is uploaded to ~/.kaggle/kaggle.json
+!kaggle datasets download -d sartajbhuvaji/brain-tumor-classification-mri -p /content/data/brain_tumor --unzip
+```
+
+### 1.2 Synthetic VQA Generation Script (Brain Tumor MRI)
+Run the following script to generate 5 deterministic questions per scan, formatted into the universal training schema `{image_path, question, answer}`:
+
+```python
+import os
+import json
+from glob import glob
+
+# 15 Fixed Canonical Classes
+ANSWER_CLASSES = [
+    "Yes", "No", "Uncertain", "Left", "Right", 
+    "Frontal", "Parietal", "Temporal", "Occipital", 
+    "Glioma", "Meningioma", "Pituitary", "Tumor", "Normal", "Edema"
+]
+CLASS_TO_IDX = {cls_name: idx for idx, cls_name in enumerate(ANSWER_CLASSES)}
+
+TEMPLATES = [
+    ("Is there an abnormality present?", lambda label: "Yes" if label != "notumor" else "No"),
+    ("Is there a tumor present?", lambda label: "Yes" if label != "notumor" else "No"),
+    ("What type of tumor is indicated?", lambda label: {
+        "glioma": "Glioma",
+        "meningioma": "Meningioma",
+        "pituitary": "Pituitary",
+        "notumor": "Normal"
+    }.get(label, "Normal")),
+    ("Which side is abnormality on?", lambda label: "Left" if "left" in label else ("Right" if "right" in label else "Normal")),
+    ("Which lobe is affected?", lambda label: "Temporal" if "glioma" in label else ("Frontal" if "meningioma" in label else "Normal")),
+]
+
+def generate_synthetic_vqa(data_dir: str, output_json: str):
+    records = []
+    classes = ["glioma", "meningioma", "pituitary", "notumor"]
+    
+    for cls in classes:
+        folder = os.path.join(data_dir, "**", cls, "*.*")
+        for img_path in glob(folder, recursive=True):
+            if not img_path.lower().endswith(('.png', '.jpg', '.jpeg')):
+                continue
+            for q_text, ans_fn in TEMPLATES:
+                records.append({
+                    "image_path": img_path,
+                    "question": q_text,
+                    "answer": ans_fn(cls)
+                })
+                
+    with open(output_json, "w") as f:
+        json.dump(records, f, indent=2)
+    print(f"Generated {len(records)} QA pairs from {data_dir}")
+
+# Execute generation
+generate_synthetic_vqa("/content/data/brain_tumor", "/content/data/synthetic_tumor_vqa.json")
+```
+
+### 1.3 Patient-Level Splitting & Augmentation Rules
+- **Split Ratio:** Split all images **80% Train / 10% Validation / 10% Test** grouped strictly by **Patient ID** to prevent cross-slice data leakage.
+- **Data Augmentations:**
+  - **Allowed:** Rotation ($\pm10^\circ$), Zoom ($0.9\times - 1.1\times$), Gaussian Noise, Intensity Shift, and Slice Shift ($[k-1, k, k+1]$ and $[k-2, k, k+2]$).
+  - **Explicitly Forbidden: Horizontal Flip.** Inverting axial brain MRI flips the anatomical left and right hemispheres (viewer's left is patient's right), invalidating labels like `Left` and `Right`.
+
+### 1.4 Colab Training Execution (PyTorch + Focal Loss + LoRA)
+Install training libraries:
+```bash
+!pip install -q open_clip_torch transformers datasets accelerate peft scikit-learn
+```
+
+Execute training script with the following hyperparameters:
+- **Vision Backbone:** BiomedCLIP ViT-B/16 (Unfreeze last 2 Transformer blocks, LR $1\times 10^{-5}$).
+- **Text Backbone & Fusion:** PubMedBERT with LoRA ($r=16, \alpha=32, \text{dropout}=0.1$) + Gated Fusion Head (LR $2\times 10^{-4}$).
+- **2.5D Volumetric Input:** 3 contiguous slices $[k-1, k, k+1]$ mean-pooled into 512-d visual embedding.
+- **Batch Size:** 16
+- **Epochs:** 15 (Save the best checkpoint based on validation loss, not the final epoch).
+- **Loss Function:** Focal Loss to counter the 70% affirmative skew:
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, reduction: str = "mean"):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        ce_loss = F.cross_entropy(inputs, targets, reduction="none")
+        p_t = torch.exp(-ce_loss)
+        focal_loss = self.alpha * ((1 - p_t) ** self.gamma) * ce_loss
+        return focal_loss.mean() if self.reduction == "mean" else focal_loss.sum()
+```
+
+### 1.5 Export LoRA & Gated Fusion Weights
+Export the trained weights to Google Drive:
+```python
+import torch
+
+torch.save({
+    "fusion_head_state_dict": model.fusion_head.state_dict(),
+    "lora_adapter_state_dict": model.get_lora_state_dict(),
+    "class_to_idx": CLASS_TO_IDX,
+    "classes": ANSWER_CLASSES,
+    "model_version": "NeuroVQA-v2.0-BiomedCLIP-GatedFusion"
+}, "/content/drive/MyDrive/neurovqa_weights.pt")
+```
+
+Download `neurovqa_weights.pt` to your local machine at:
+`k:\NeuroVQA V26\backend\checkpoints\neurovqa_weights.pt`
+
+---
+
+## 2. Local Workstation Setup (Intel Core i3, 8 GB RAM)
+
+### 2.1 Python Virtual Environment & Dependencies
+Verify Python 3.10+ is installed:
+```powershell
 python --version
+```
 
-mkdir NeuroVQA
-cd NeuroVQA
-
+From the root project directory (`k:\NeuroVQA V26`):
+```powershell
+# Create virtual environment if needed
 python -m venv venv
-
-# Windows PowerShell
 .\venv\Scripts\Activate.ps1
 
-# Windows Command Prompt
-.\venv\Scripts\activate.bat
-```
-
-### 4.2 Create `backend/requirements.txt`
-
-```text
-# API server
-fastapi>=0.110.0
-uvicorn>=0.29.0
-python-multipart>=0.0.9
-websockets>=12.0
-httpx>=0.27.0
-
-# Authentication and database
-sqlalchemy>=2.0.0
-passlib[bcrypt]>=1.7.4
-python-jose[cryptography]>=3.3.0
-alembic>=1.13.0
-
-# PyTorch CPU build
-torch>=2.2.0 --index-url https://download.pytorch.org/whl/cpu
-torchvision>=0.17.0 --index-url https://download.pytorch.org/whl/cpu
-
-# Multimodal VQA models
-open_clip_torch>=2.24.0
-transformers>=4.38.0
-peft>=0.8.0
-accelerate>=0.29.0
-
-# Image processing and explainability
-Pillow>=10.2.0
-opencv-python>=4.9.0
-matplotlib>=3.8.0
-numpy>=1.24.0
-SimpleITK>=2.3.1
-
-# PDF report generation
-reportlab>=4.1.0
-
-# Optional local RAG
-chromadb>=0.5.0
-sentence-transformers>=2.7.0
-```
-
-Install:
-
-```bash
+# Install lightweight CPU runtime dependencies
 pip install -r backend/requirements.txt
 ```
 
----
+### 2.2 Ollama Chat Service Setup (Llama 3.2 1B Only)
+> ⚠️ **Hardware Constraint:** `phi3:mini` is **strictly prohibited** because it generates at only 4–6 tokens/sec on an i3 CPU and consumes 2.3 GB RAM. Only the lightweight `llama3.2:1b` model is supported.
 
-## 5. Frontend Setup
+1. Download and install Ollama from [https://ollama.com](https://ollama.com).
+2. Pull the quantized 1B model:
+   ```powershell
+   ollama pull llama3.2:1b
+   ```
+3. Test streaming in terminal:
+   ```powershell
+   ollama run llama3.2:1b "Explain brain MRI T1 contrast in 20 words."
+   ```
+4. Ollama runs as a background service on port `11434`.
 
-```bash
-npm create vite@latest frontend -- --template react-ts
-cd frontend
-npm install
-npm install react-router-dom motion axios zustand react-hook-form zod lucide-react recharts
-npm install tailwindcss @tailwindcss/vite
-```
+### 2.3 Offline Environment Configuration
+To prevent Hugging Face and PyTorch from making outbound calls during local clinical inference, configure offline variables:
 
-Configure `frontend/vite.config.ts`:
-
-```ts
-import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
-import tailwindcss from "@tailwindcss/vite";
-
-export default defineConfig({
-  plugins: [react(), tailwindcss()],
-});
-```
-
-Add Tailwind to `frontend/src/index.css`:
-
-```css
-@import "tailwindcss";
-```
-
----
-
-## 6. Ollama Chat Model Setup
-
-Because the laptop has only 8 GB RAM and integrated graphics, use a **small quantized chat model**. Do not use an 8B model while NeuroVQA VQA models are loaded.
-
-Recommended:
-
-```bash
-ollama pull llama3.2:1b
-```
-
-Alternative:
-
-```bash
-ollama pull phi3:mini
-```
-
-For the most reliable offline demo on 8 GB RAM, start with `llama3.2:1b`. If memory remains available after loading NeuroVQA, test `phi3:mini`.
-
-Verify:
-
-```bash
-ollama run llama3.2:1b
-```
-
-Ollama runs locally on port `11434` and supports streaming chat responses.
-
----
-
-## 7. Prepare Offline Model Assets
-
-Before enabling Airplane Mode, download and store these assets locally:
-
-```text
-backend/checkpoints/biomedclip/
-├── open_clip_pytorch_model.bin
-└── open_clip_config.json
-
-backend/checkpoints/pubmedbert/
-├── config.json
-├── tokenizer.json
-├── tokenizer_config.json
-├── vocab.txt
-└── model weights
-
-backend/checkpoints/neurovqa_weights.pt
-backend/data/demo_samples/case1.png
-backend/data/demo_samples/case2.png
-backend/data/demo_samples/case3.png
-```
-
-Set offline environment variables before starting the backend:
-
-PowerShell:
-
+**PowerShell:**
 ```powershell
 $env:HF_HUB_OFFLINE = "1"
 $env:TRANSFORMERS_OFFLINE = "1"
 ```
 
-Command Prompt:
-
+**Command Prompt / System Environment:**
 ```bat
 set HF_HUB_OFFLINE=1
 set TRANSFORMERS_OFFLINE=1
@@ -256,129 +195,86 @@ set TRANSFORMERS_OFFLINE=1
 
 ---
 
-## 8. Google Colab Training Pipeline
+## 3. Running NeuroVQA Locally
 
-### 8.1 Create Colab Notebook
-
-1. Open Google Colab.
-2. Create `NeuroVQA_Training.ipynb`.
-3. Select **Runtime > Change runtime type > T4 GPU**.
-
-### 8.2 Install Training Dependencies
-
-```python
-!pip install -q open_clip_torch transformers datasets accelerate peft albumentations scikit-learn
-!nvidia-smi
+### 3.1 Start the FastAPI Backend Server (Terminal 1)
+```powershell
+cd "k:\NeuroVQA V26"
+.\venv\Scripts\Activate.ps1
+python -m uvicorn backend.main:app --port 8000 --reload
 ```
+- API Health Check: `http://localhost:8000/api/health`
+- Swagger Interactive Documentation: `http://localhost:8000/docs`
 
-### 8.3 Mount Google Drive
-
-```python
-from google.colab import drive
-import os
-
-drive.mount('/content/drive')
-
-CHECKPOINT_DIR = "/content/drive/MyDrive/NeuroVQA_Checkpoints"
-os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-```
-
-### 8.4 Train and Export LoRA Adapter
-
-```python
-import torch
-
-torch.save({
-    "model_state_dict": model.fusion_head.state_dict(),
-    "class_to_idx": train_dataset.class_to_idx,
-    "idx_to_class": train_dataset.idx_to_class
-}, f"{CHECKPOINT_DIR}/neurovqa_weights.pt")
-```
-
-Download the exported checkpoint into:
-
-```text
-backend/checkpoints/neurovqa_weights.pt
-```
-
-Save checkpoints to Google Drive during training to avoid losing them if the Colab session disconnects.
-
----
-
-## 9. Run NeuroVQA Locally
-
-### 9.1 Start FastAPI Backend
-
-```bash
-cd NeuroVQA
-.\venv\Scripts\activate
-uvicorn backend.main:app --reload --port 8000
-```
-
-Backend API documentation:
-
-<http://localhost:8000/docs>
-
-### 9.2 Start React Frontend
-
-Open a second terminal:
-
-```bash
-cd NeuroVQA/frontend
+### 3.2 Start the React + Vite Frontend (Terminal 2)
+```powershell
+cd "k:\NeuroVQA V26\frontend"
+npm install
 npm run dev
 ```
-
-Frontend:
-
-<http://localhost:5173>
-
-For the viva, build the frontend first and serve the production build through FastAPI to reduce browser memory usage:
-
-```bash
-cd frontend
-npm run build
-```
-
-### 9.3 Start Ollama
-
-```bash
-ollama serve
-```
+- Doctor Web Interface: `http://localhost:5173`
 
 ---
 
-## 10. Additional Feature Workflow
+## 4. Sequential Memory Operation & Verification
 
-```text
-1. Doctor uploads MRI and runs VQA analysis
-2. System saves diagnosis, heatmap, latency, and model version
-3. Doctor asks follow-up questions through real-time chat
-4. Doctor downloads a structured PDF report
-5. Doctor submits feedback: Correct / Partially Correct / Incorrect / Uncertain
-6. Dashboard updates case statistics, confidence trends, and feedback summary
-7. Audit trail records every major action locally
-8. Doctor can reopen historical cases and compare current and previous MRIs
-```
+To verify that the sequential memory model stays within the $\le 4.6\text{ GB}$ ceiling:
+
+1. **Baseline Idle State:**
+   - Open Windows Task Manager (`Ctrl + Shift + Esc`) $\rightarrow$ Performance $\rightarrow$ Memory.
+   - Baseline system RAM: ~2.5 GB.
+2. **During MRI Analysis (VQA Active):**
+   - Upload MRI scan and submit question.
+   - Active memory increases to ~3.8 GB as 2.5D BiomedCLIP and Gated Fusion execute.
+   - Inference completes in $\le 4.0$ seconds after warm-up on Intel Core i3 (using `torch.set_num_threads(2)`).
+   - Attention $\times$ Gradient Grad-CAM renders on the viewer.
+3. **During Grounded Doctor Chat (Ollama Active):**
+   - Click one of the 3 quick chips: `[Why this answer?]`, `[What region?]`, or `[How confident?]`.
+   - VQA engine unloads transient cache (`gc.collect()`).
+   - Ollama loads `llama3.2:1b` (~1.2 GB RAM). Peak RAM remains $\le 4.6\text{ GB}$.
+   - Text streams token-by-token at 12–15 tokens/sec.
+   - Generation terminates strictly at 140 tokens (~8–10 sec).
+   - Ollama unloads via `keep_alive: "0s"` when streaming concludes.
 
 ---
 
-## 11. Offline Verification Checklist
+## 5. Offline Airplane Mode Verification Protocol
 
-- [ ] React frontend dependencies installed
-- [ ] FastAPI backend dependencies installed
-- [ ] BiomedCLIP weights stored locally
-- [ ] PubMedBERT model and tokenizer stored locally
-- [ ] LoRA adapter checkpoint available
-- [ ] Small Ollama chat model downloaded
-- [ ] Demo MRI scans available
-- [ ] SQLite database initialized
-- [ ] Doctor signup/login tested
-- [ ] MRI upload and VQA prediction tested
-- [ ] Grad-CAM heatmap displayed
-- [ ] Real-time chat tested
-- [ ] PDF report generated and downloaded
-- [ ] Dashboard metrics displayed
-- [ ] Case history searchable
-- [ ] Doctor feedback submitted
-- [ ] Audit trail recorded
-- [ ] Airplane mode enabled and full workflow retested
+Before demonstration, presentation, or viva defense, execute this step-by-step checklist:
+
+- [ ] Disconnect Wi-Fi and Ethernet (enable **Airplane Mode** in Windows Settings).
+- [ ] Set environment flags: `$env:HF_HUB_OFFLINE = "1"` and `$env:TRANSFORMERS_OFFLINE = "1"`.
+- [ ] Launch FastAPI backend on port 8000.
+- [ ] Launch React frontend on port 5173.
+- [ ] **Test Case 1 (Clear Tumor):**
+  - Upload left temporal tumor slice.
+  - Submit: *"Is there a tumor present?"*
+  - Verify prediction: `Yes` (Confidence $\ge 0.90$).
+  - Confirm focal Attention $\times$ Gradient heatmap renders over the mass.
+- [ ] **Test Case 2 (Normal Scan):**
+  - Upload normal brain slice.
+  - Submit: *"Is there an abnormality present?"*
+  - Verify prediction: `Normal` (Confidence $\ge 0.85$).
+- [ ] **Test Case 3 (Borderline Case):**
+  - Upload borderline faint lesion slice.
+  - Verify prediction outputs `Uncertain - Needs Radiologist Review` (Confidence $< 0.60$).
+- [ ] **Test Grounded Chat:**
+  - Click `[Why this answer?]`.
+  - Confirm token-by-token streaming response without internet.
+  - Confirm disclaimer: *"For clinician review only."*
+- [ ] **Test Clinical PDF Export:**
+  - Click "Download Clinical PDF".
+  - Verify exported PDF contains case metadata, slice preview, Grad-CAM heatmap, and legal disclaimers.
+- [ ] **Test History & Feedback:**
+  - Confirm case appears in History tab.
+  - Submit feedback rating (`Correct`) and verify it persists in local SQLite (`backend/neurovqa.db`).
+
+---
+
+## 6. Phase 1 Scope Cuts (Explicitly Deferred)
+
+The following components are deferred to Phase 2 to preserve the 8 GB RAM / i3 performance invariant:
+- $\times$ **ChromaDB / Vector RAG:** (Consumes 800 MB+ RAM and introduces extraneous retrieval latency).
+- $\times$ **Dual-MRI Side-by-Side Comparison:** (Requires running 2 concurrent VQA pipelines, exceeding the 4.0s latency budget).
+- $\times$ **Full 3D NIfTI Volumetric Segmentation:** (Requires heavy 3D ConvNets and high memory).
+- $\times$ **Cloud LLM API Mode:** (Violates the 100% offline air-gapped hospital requirement).

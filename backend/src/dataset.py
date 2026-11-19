@@ -19,6 +19,13 @@ except (ImportError, ModuleNotFoundError):
     transforms = None  # type: ignore
     HAS_TORCH = False
 
+try:
+    import pydicom  # type: ignore[import-not-found, import-untyped]
+    HAS_PYDICOM = True
+except (ImportError, ModuleNotFoundError):
+    pydicom = None  # type: ignore
+    HAS_PYDICOM = False
+
 # Torchvision standard normalization parameters for BiomedCLIP ViT-B/16
 NORM_MEAN = [0.48145466, 0.4578275, 0.40821073]
 NORM_STD = [0.26862954, 0.26130258, 0.27577711]
@@ -100,17 +107,86 @@ def extract_nifti_axial_slice(
     return center_slice, stack_25d
 
 
+def is_dicom_data(data: bytes) -> bool:
+    """Checks if raw bytes represent a DICOM image file."""
+    if not isinstance(data, (bytes, bytearray)) or len(data) < 132:
+        return False
+    # Standard DICOM files have a 128-byte preamble followed by b'DICM'
+    if data[128:132] == b"DICM":
+        return True
+    # Preamble-less DICOM check: tag (0x0008, 0x0016) or (0x0008, 0x0000)
+    if data[:2] in (b"\x08\x00", b"\x00\x08"):
+        return True
+    return False
+
+
+def load_dicom_slice(dicom_input: Union[bytes, str]) -> Tuple[np.ndarray, dict]:
+    """
+    Loads an axial brain MRI slice and clinical metadata from DICOM input.
+    Supports single-frame and multi-frame MRI DICOM.
+    Applies Rescale Slope/Intercept and handles MONOCHROME1 vs MONOCHROME2.
+    """
+    if not HAS_PYDICOM:
+        raise ImportError("pydicom is required to parse DICOM (.dcm) files.")
+
+    if isinstance(dicom_input, (bytes, bytearray)):
+        ds = pydicom.dcmread(BytesIO(dicom_input), force=True)
+    else:
+        ds = pydicom.dcmread(dicom_input, force=True)
+
+    if not hasattr(ds, "file_meta"):
+        ds.file_meta = pydicom.dataset.FileMetaDataset()
+    if "TransferSyntaxUID" not in ds.file_meta:
+        ds.file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+
+    pixel_array = ds.pixel_array.astype(np.float32)
+
+    # Multi-frame volume extraction (e.g. 3D MR acquisition)
+    if pixel_array.ndim > 2:
+        if pixel_array.ndim == 3 and pixel_array.shape[-1] not in (3, 4):
+            # Shape is (Frames, H, W)
+            center_idx = pixel_array.shape[0] // 2
+            pixel_array = pixel_array[center_idx]
+        elif pixel_array.ndim == 4:
+            pixel_array = pixel_array[pixel_array.shape[0] // 2, 0]
+
+    # Clinical Rescale Slope and Intercept
+    slope = float(getattr(ds, "RescaleSlope", 1.0))
+    intercept = float(getattr(ds, "RescaleIntercept", 0.0))
+    if slope != 1.0 or intercept != 0.0:
+        pixel_array = pixel_array * slope + intercept
+
+    # Photometric Interpretation: MONOCHROME1 has inverted grayscale (0 is white)
+    photometric = getattr(ds, "PhotometricInterpretation", "MONOCHROME2")
+    if photometric == "MONOCHROME1":
+        pixel_array = np.max(pixel_array) - pixel_array
+
+    metadata = {
+        "patient_id": str(getattr(ds, "PatientID", "Anonymous")),
+        "modality": str(getattr(ds, "Modality", "MR")),
+        "series_description": str(getattr(ds, "SeriesDescription", "")),
+        "slice_thickness": float(getattr(ds, "SliceThickness", 1.0)) if hasattr(ds, "SliceThickness") else 1.0,
+        "rows": int(getattr(ds, "Rows", pixel_array.shape[0])),
+        "columns": int(getattr(ds, "Columns", pixel_array.shape[1])),
+    }
+
+    return pixel_array, metadata
+
+
 def preprocess_mri_image(image_input: Union[bytes, Image.Image, np.ndarray, str]) -> Tuple[np.ndarray, any]:
     """
-    Preprocess MRI image array, NIfTI volume, or raw bytes into:
+    Preprocess MRI image array, NIfTI volume, DICOM slice, or raw bytes into:
     1. Display-ready normalized RGB numpy array (224, 224, 3) in [0, 255] uint8.
     2. Model-ready PyTorch tensor (1, 3, 224, 224) float32 normalized.
     """
-    # 1. Load image (supports PNG, JPEG, TIFF, and NIfTI .nii / .nii.gz)
+    # 1. Load image (supports PNG, JPEG, TIFF, NIfTI .nii / .nii.gz, and DICOM .dcm)
     if isinstance(image_input, (bytes, bytearray)):
         if is_nifti_data(image_input):
             center_slice, stack_25d = extract_nifti_axial_slice(image_input)
             img_np = stack_25d if stack_25d is not None else np.stack([center_slice] * 3, axis=-1)
+        elif is_dicom_data(image_input):
+            dcm_slice, _ = load_dicom_slice(image_input)
+            img_np = np.stack([dcm_slice] * 3, axis=-1)
         else:
             pil_img = Image.open(BytesIO(image_input)).convert("RGB")
             img_np = np.array(pil_img, dtype=np.float32)
@@ -118,6 +194,9 @@ def preprocess_mri_image(image_input: Union[bytes, Image.Image, np.ndarray, str]
         if image_input.endswith((".nii", ".nii.gz")):
             center_slice, stack_25d = extract_nifti_axial_slice(image_input)
             img_np = stack_25d if stack_25d is not None else np.stack([center_slice] * 3, axis=-1)
+        elif image_input.lower().endswith((".dcm", ".dicom")):
+            dcm_slice, _ = load_dicom_slice(image_input)
+            img_np = np.stack([dcm_slice] * 3, axis=-1)
         else:
             pil_img = Image.open(image_input).convert("RGB")
             img_np = np.array(pil_img, dtype=np.float32)
@@ -172,8 +251,12 @@ def pack_25d_stack(slice_k_minus_1: Union[np.ndarray, bytes], slice_k: Union[np.
     slices = []
     for s in [slice_k_minus_1, slice_k, slice_k_plus_1]:
         if isinstance(s, bytes):
-            img = Image.open(BytesIO(s)).convert("L")
-            slices.append(np.array(img, dtype=np.float32))
+            if is_dicom_data(s):
+                dcm_arr, _ = load_dicom_slice(s)
+                slices.append(dcm_arr)
+            else:
+                img = Image.open(BytesIO(s)).convert("L")
+                slices.append(np.array(img, dtype=np.float32))
         elif isinstance(s, np.ndarray):
             arr = s.astype(np.float32)
             if arr.ndim == 3:

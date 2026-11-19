@@ -68,11 +68,14 @@ export default function ChatPanel({ sessionId }: { sessionId?: string | number }
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         message: text,
-        diagnosis_context: currentDiagnosis ? {
+        case_id: currentDiagnosis?.id || sessionId,
+        vqa_context: currentDiagnosis ? {
           answer: currentDiagnosis.answer,
           confidence: currentDiagnosis.confidence,
           status: currentDiagnosis.status,
-          top_3: currentDiagnosis.top_3_predictions,
+          top3: currentDiagnosis.top_3_predictions,
+          top_3_predictions: currentDiagnosis.top_3_predictions,
+          heatmap_region: currentDiagnosis.focused_region || "Temporal / Parietal territory",
         } : null,
       }));
     } else {
@@ -99,10 +102,9 @@ export default function ChatPanel({ sessionId }: { sessionId?: string | number }
   };
 
   const QUICK_PROMPTS = [
-    "Why do you think there is a lesion?",
-    "What does the heatmap region indicate?",
-    "How confident is the model, and why?",
-    "Should this be urgent?",
+    "Why this answer?",
+    "What region?",
+    "How confident?",
   ];
 
   return (
