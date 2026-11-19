@@ -229,22 +229,10 @@ try:
 except Exception as e:
     print(f"   ℹ️ SLAKE notice: {e}")
 
-# ── 6.3 Synthetic VQA Generation for Kaggle Brain Tumor MRI ───────────────────
-print("3. Checking Kaggle Brain Tumor MRI Dataset...")
-tumor_dir = os.path.join(DATA_DIR, "brain_tumor")
-if not os.path.exists(tumor_dir) or len(glob(os.path.join(tumor_dir, "**", "*.*"), recursive=True)) < 100:
-    print("   Attempting Kaggle download...")
-    # Requires ~/.kaggle/kaggle.json
-    res = os.system(f"kaggle datasets download -d sartajbhuvaji/brain-tumor-classification-mri -p {tumor_dir} --unzip")
-    if res != 0 or not os.path.exists(tumor_dir):
-        print("   ⚠️ Kaggle CLI download deferred. Generating synthetic demo scans for offline/standalone execution...")
-        os.makedirs(tumor_dir, exist_ok=True)
-        for cls_name in ["glioma", "meningioma", "pituitary", "notumor"]:
-            cls_folder = os.path.join(tumor_dir, cls_name)
-            os.makedirs(cls_folder, exist_ok=True)
-            for s_idx in range(40):
-                dummy_img = Image.fromarray(np.random.randint(40, 220, (224, 224, 3), dtype=np.uint8))
-                dummy_img.save(os.path.join(cls_folder, f"patient_{s_idx:03d}_slice.png"))
+# ── 6.3 Real Clinical Brain Tumor MRI Dataset (Hugging Face Hub) ──────────────
+print("3. Downloading Brain Tumor MRI Dataset (7,000+ real clinical scans)...")
+tumor_dir = os.path.join(DATA_DIR, "brain_tumor_scans")
+os.makedirs(tumor_dir, exist_ok=True)
 
 TEMPLATES = [
     ("Is there an abnormality present?", lambda label: "No" if label == "notumor" else "Yes"),
@@ -256,24 +244,77 @@ TEMPLATES = [
     ("Which lobe is affected?", lambda label: "Normal" if label == "notumor" else ("Temporal" if label == "glioma" else "Frontal")),
 ]
 
-classes = ["glioma", "meningioma", "pituitary", "notumor"]
 count_tumor = 0
-for cls in classes:
-    for f in glob(os.path.join(tumor_dir, "**", cls, "*.*"), recursive=True):
-        if f.lower().endswith(('.png', '.jpg', '.jpeg')):
-            p_id = os.path.splitext(os.path.basename(f))[0].split("_slice")[0]
-            for q_text, ans_fn in TEMPLATES:
-                ans = ans_fn(cls)
-                if ans in ANSWER_CLASSES:
-                    all_records.append({
-                        "image_path": f,
-                        "question": q_text,
-                        "answer": ans,
-                        "patient_id": f"tumor_{p_id}",
-                    })
-                    count_tumor += 1
+label_names = ["glioma", "meningioma", "notumor", "pituitary"]
 
-print(f"   ✅ Processed {count_tumor} Brain Tumor MRI QA pairs.")
+try:
+    print("   Downloading from Hugging Face Hub (Hemg/Brain-Tumor-MRI-Dataset)...")
+    ds_tumor = load_dataset("Hemg/Brain-Tumor-MRI-Dataset")
+    for split_name in ds_tumor.keys():
+        for idx, item in enumerate(ds_tumor[split_name]):
+            lbl_raw = item.get("label")
+            cls_name = label_names[lbl_raw] if isinstance(lbl_raw, int) and lbl_raw < len(label_names) else str(lbl_raw).lower()
+            img = item.get("image")
+            if img is not None:
+                img_path = os.path.join(tumor_dir, f"mri_{split_name}_{idx}.png")
+                img.save(img_path)
+                p_id = f"mri_patient_{split_name}_{idx // 4}"
+                for q_text, ans_fn in TEMPLATES:
+                    ans = ans_fn(cls_name)
+                    if ans in ANSWER_CLASSES:
+                        all_records.append({
+                            "image_path": img_path,
+                            "question": q_text,
+                            "answer": ans,
+                            "patient_id": p_id,
+                        })
+                        count_tumor += 1
+    print(f"   ✅ Processed {count_tumor} Brain Tumor MRI QA pairs from real clinical scans.")
+except Exception as e:
+    print(f"   ⚠️ Primary source notice ({e}). Trying secondary Hugging Face dataset...")
+    try:
+        ds_alt = load_dataset("alfa-bravo/Brain-Tumor-Mri-Dataset")
+        for split_name in ds_alt.keys():
+            for idx, item in enumerate(ds_alt[split_name]):
+                lbl_raw = item.get("label")
+                cls_name = label_names[lbl_raw] if isinstance(lbl_raw, int) and lbl_raw < len(label_names) else str(lbl_raw).lower()
+                img = item.get("image")
+                if img is not None:
+                    img_path = os.path.join(tumor_dir, f"alt_{split_name}_{idx}.png")
+                    img.save(img_path)
+                    p_id = f"alt_patient_{split_name}_{idx // 4}"
+                    for q_text, ans_fn in TEMPLATES:
+                        ans = ans_fn(cls_name)
+                        if ans in ANSWER_CLASSES:
+                            all_records.append({
+                                "image_path": img_path,
+                                "question": q_text,
+                                "answer": ans,
+                                "patient_id": p_id,
+                            })
+                            count_tumor += 1
+        print(f"   ✅ Processed {count_tumor} Brain Tumor MRI QA pairs from secondary source.")
+    except Exception as e2:
+        print(f"   ⚠️ Secondary notice ({e2}). Trying Kaggle CLI...")
+        res = os.system(f"kaggle datasets download -d sartajbhuvaji/brain-tumor-classification-mri -p {tumor_dir} --unzip")
+        if res == 0:
+            for cls in ["glioma", "meningioma", "pituitary", "notumor"]:
+                for f in glob(os.path.join(tumor_dir, "**", cls, "*.*"), recursive=True):
+                    if f.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        p_id = os.path.splitext(os.path.basename(f))[0].split("_slice")[0]
+                        for q_text, ans_fn in TEMPLATES:
+                            ans = ans_fn(cls)
+                            if ans in ANSWER_CLASSES:
+                                all_records.append({
+                                    "image_path": f,
+                                    "question": q_text,
+                                    "answer": ans,
+                                    "patient_id": f"tumor_{p_id}",
+                                })
+                                count_tumor += 1
+            print(f"   ✅ Processed {count_tumor} Brain Tumor MRI QA pairs from Kaggle.")
+
+print(f"   ✅ Total Brain Tumor MRI QA pairs: {count_tumor}")
 print(f"📊 Total Combined Multi-Dataset Corpus: {len(all_records)} QA records.")
 """),
 
@@ -658,7 +699,8 @@ print(classification_report(all_targets, all_preds, target_names=[ANSWER_CLASSES
 print(f"Expected Calibration Error (ECE) : {ece_score:.4f} (Threshold: <= 0.05)")
 
 # 3-Way Ablation Study Summary Table
-print("\n" + "=" * 65)
+print()
+print("=" * 65)
 print("THREE-WAY ARCHITECTURAL ABLATION STUDY TABLE (PRD Section 7)")
 print("=" * 65)
 print("| Model Variant               | Test Accuracy | Macro F1 | ECE    |")
